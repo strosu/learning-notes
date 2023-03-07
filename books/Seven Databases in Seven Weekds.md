@@ -11,7 +11,7 @@ Contents
  * [Abstractions](#abstractions)
  * [Next Steps](#next-steps)
 
-### Intro
+# Intro
 
 - The goal is to get a better understanding of the types of tools available for data storage and manipulation. 
 - Any database can be used to store any data, just like you can use a screwdriver to hammer a nail. Just because you can use them does not make them the right tools for the job
@@ -26,3 +26,24 @@ For each of the databases presented, the book explores:
 
 
 ## Database types
+
+### Relational
+
+- two dimensional tables with rows and collumns
+- interacton is done via SQL queries
+- data values are typed and may be: numeric, strings, dates, blobs or others. These types are enforced by the system via the table schemas
+- tables can be morphed into new ones via joining
+- covered exampls is PostreSQL (TODO - link here)
+
+### Key Value
+- simples model covered
+- stores data similarly to a Dictionary
+- some implementation allow defining more compelex types, or iterating through all the values, but not necessarily
+- due to its simplicity, the performance can be great, but this won't be hepful with complex queries or aggregations
+- covered examples: Redis, DynamoDB (TODO - link here)
+
+Redis:
+- supports complex data types like hashes and sorted sets (this is relevant for some scenarios, e.g. a learderboard can be stored out of the box).
+- supports a publish-subscribe pattern, as well as blocking queues
+- caches writes in memory before pushing to disk; very performant, but can lead to data loss
+- great as a message broker and for holding noncritical information (if it's lost, it can be reconstructued or discarded safely). E.g. session data, worst case scenario some users need to log in again

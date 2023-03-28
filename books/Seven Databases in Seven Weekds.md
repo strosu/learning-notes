@@ -4,12 +4,7 @@ Contents
 ========
 
  * [Intro](#intro)
- * [Assumptions](#assumptions)
- * [Structure](#structure)
- * [Observations](#observations)
- * [General approach](#general-approach)
- * [Abstractions](#abstractions)
- * [Next Steps](#next-steps)
+ * [PostreSQL](#postgres)
 
 # Intro
 
@@ -36,6 +31,7 @@ For each of the databases presented, the book explores:
 - covered exampls is PostreSQL (TODO - link here)
 
 ### Key Value
+
 - simples model covered
 - stores data similarly to a Dictionary
 - some implementation allow defining more compelex types, or iterating through all the values, but not necessarily
@@ -47,3 +43,26 @@ Redis:
 - supports a publish-subscribe pattern, as well as blocking queues
 - caches writes in memory before pushing to disk; very performant, but can lead to data loss
 - great as a message broker and for holding noncritical information (if it's lost, it can be reconstructued or discarded safely). E.g. session data, worst case scenario some users need to log in again
+
+### Columnar
+
+- values in the same column are stored together, helping with data locallity for certain queries
+- adding columns is inexpensive and is done on a row by row basis
+- each row can have a different set of columns and null values are not stored, so sparse databases don't take up so much space
+
+### Document
+
+- stores documents: objects with a unque ID, and more fields, which can also be documents
+- supports nested structures
+
+
+### Graph 
+
+- suited for representing relations between highly connected data points
+- database consists of nodes and the edges between them
+- easy to traverse through nodes by following the relations
+
+
+# Postgres
+
+- easy to store data and figure out what to do with it later

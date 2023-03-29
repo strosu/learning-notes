@@ -76,3 +76,146 @@ In AMQP, adding a consumer will only deliver the following messages to it; previ
 - in the same partition, the broker assigns an increasing sequence to messages (the offset)
 - can handle millions of messages per second, by partitioning across multiple machines; this provides faul tolerance via replication, and all messages are written to the disk
 
+Compared to traditional messaging:
+- fan out is supported out of the box - as any number of consumers can read from a single log, they don't interfere with each other. We can have any number of services reading the log at the same time
+- cannot load balance a single partition, as the messages are designed to be read sequentially. Instead, different partitions can be assigned to different consumers / consumer groups, which read the messages in a single threaded manner
+- the number of parallelized consumers can be at most the number of partitions; generally a bad idea to have a partition *split* between multiple consumers. Instead, add more partitions.
+
+Consumer offsets:
+- each consumer regularly notifies the broker of the last read offset. This is in effect an acknowledgement mechanism, as it means messages with a greater offset have not been seen yet. Due to the serial processing, when a consumer says it has processed message X, it implies X-1 etc have also been processed. Thus, not every message needs to be ACKd.
+- the broker is a master, the consumers are followers, similarly to a replicated DB. When a consumer fails, a new one is assigned its partitions, and it receives messages since the last ACKed offset - this can result in duplicate processing, e.g. if the initial node processed but didn't get the chance to send the new offset.
+- all the messages are written to the disk, so eventually space will run out. When this happens, older segments are archived or discarted, so the broker is in effect a large **ring-buffer**. This means that it is possible for a consumer to be so far behind, that its offset is before archived / deleted messages. In this case, another mechanism is needed, perhaps to spin a new consumer if the current one falls too far behind. 
+- since consumers are independent, this opens up a scenario of consuming the production logs into a test environment, which would not be possible with a regular database
+- this is opposed to AMQP, where a message is deleted once it's ACKd. With a log based broker, we don't have such problems
+
+## Databases and streams
+
+A replication log is a stream of database reads and is used for replicating the changes to followers. It is used to keep them in sync, and is very similar to a log based message broker. That is, mulitple consumers applying the same changes will end up in the same state (assuming the changes are deterministic).
+
+When dealing with data stored in multiple places:
+- we can have the service update both systems, e.g. the DB and the search index.
+    - this raises the problem of atomicity, as transactions are not supported across different products
+    - concurent updates might partially overwrite each other, and these are hard to detect
+    - one operation might fail, while the other one succeeds, leaving the system in an inconsistent state
+    - atomic or two-phase commits might solve the problem, but it's expensive
+
+Change data capture
+
+The solution to the above problem is to introduce a leader and have the other systems follow its writes.   
+    - the master outputs a stream of changes, ideally as soon as they are written
+    - the stream is read by the consumers, which in turn apply those changes to their internal state
+    - as we care about the ordering, a log based system is ideal here: the master appends and the followers read sequentially
+    - two consumers that have the same offset should have the same view of the data
+
+Log storage
+
+- the current state can be reconstructed by replaying all the events since the beginning of time
+- the number of logs can grow too big and firing up a new consumer will be very slow
+- snapshots can be used at regular intervals; a snapshot is the corresponding state of the system at a particular offset. New consumers can just load the most rececent one and apply only the following logs
+- logs can also be compacted. Instead of haveing to store all the changes to a record, we can store its most current value. E.g. a write of 1 and a write of 3 can be compacted to a single write of 3. Thus, the disk size required is a function of the data set, and not of the number of changes throughout history.
+- Kafka supports log compaction, allowing it to be used for persistent storage and not just transient messaging
+
+## Event sourcing
+
+- all the changes to a system are stored as events (the Command part of CQRS). These are immutable user actions and we are storing the action itself, rather than the effect on the database (e.g. overwrite a 1 with a 3)
+- updates and deletes are discouraged / forbidden
+
+- the event log does not easily expose the current state of the system. Users expect to see what is in their cart, not a history of it
+- thus, the log needs to be parsed into application state which can then be shown to the user (the Query part of CQRS). This means processing it into a different system which is used for reads. 
+
+- as opposed to Change Capture, which contained the entire object, events only represent partial changes (e.g. set updated a field of an object). Thus, log compaction cannot work the same way, as newer events don't necessarily overwrite older ones. 
+- the system that stores the data representation needs to take regular snapshots and their associated log offest. This allows a quick reconstruction, but the log itself is still needed.
+
+Commands and Events
+
+- a message broker allows decoupling the time/service that generates an event and the time/service that process it. The whole operation is asynchronous and mostly one way, so a command needs to be validated before being added to the message log. 
+- the validation needs to be synchronious with the command itself, that is we would not return a success until the command has been verified. Once success is returned, we should be guaranteed to process it correctly.
+- when the message is generated, it becomes an immutable fact. Undoing it will only add another event on top, not modify the initial one.
+
+## State, streams and immutability
+
+Mutable state and an event log are two different views of the same data and are tightly related. The mutable state represents simply the top of the stack, while the event log is the series of actions that took the system to that state. 
+
+- storing the log durably makes it the system of record (source of truth). The database is simply a cache of the most recent values.
+- immutable events capture more data: e.g. when adding and removing an item to a cart, the event log will have 2 messages, while storing just the cart state will tell us nothing
+
+- separating the immutable events into a log allows us to have multiple independent systems reading the stream
+- by separating the reads, we can build read-optimized views of it and have it run in parallel with the existing system
+- regular DBs are slower than an event log due to the fact that we need to update information in random places: on the disk where it's stored, the indexes, etc. If we don't care how the reads are going to process this, it becomes much faster to just append to a log.
+- **data does not need to be written in the same format in which it will be consumed**. This simplifies things greatly, as it allows the views to store it however they like on their side. 
+
+Limitations of immutability:
+
+It might not be feasible to store all the changes done since the beginning of time. This depends on what the data looks like.
+    - if it's a small set that changes often, the stored data will quickly outgrow the size of the current state and immutability might not be the ideal solution
+    - if the data is mostly adds (e.g. sensor readings), immutability might works nicely
+    - data might nneed to be deleted for other reasons, e.g. administrative, legal (GDPR). With the log, we cannot really remove the previous entries, we can just make them harder to obtain via application code. Backups are immutable by design, it is not fesible to go and change them
+
+
+## Processing streams
+
+Once we have the events, we can:
+- store them in a different system, e.g. a DB or a search index
+- perform an action based on them, such as sending an email or raising a notification towards a user
+- process / combine multiple streams and produce an output stream
+    - very similar to Map Reduce
+    - writes its output in a different location, but also in an append only fashion
+
+Complex event processing (CEP):
+- reverses the SQL pattern where we store the data and the query is transient 
+- stores the query (think of a rule such as "when more than 20 events happen in X seconds, do something) and tries to match it to incoming data (which is transient)
+
+Stream analytics:
+- measuring how often an event happens
+- calculating averages over a period (e.g. latency for requests)
+- comparing current intervals to previous ones, to determine anomalies, e.g. an increase in resource usage, queue length etc
+- Kafka streams (TODO - add more info here)
+
+Querying on streams:
+- done similarly to CEP - the query needs to be known in advance, and incoming events are matched to it
+- ElasticSearch can be a good candidate for these scenarions
+
+## Time
+
+Two approaches: event execution time, or processing time. 
+- Batching relies on event time, as the processing time is irrelenvant
+- streaming generally uses the processing time, so it's local
+
+Trying to count events in a window:
+- it's impossible to say if we received all the events, or if some are stuck somewhere and will arrive later. This might happen if an instance is slower and the message simply hasn't reached us yet.
+- either ingore the straggler events, if they are a small percentage and the business case allows it
+- correct the older values when receiving new events. 
+- when consuming events from multiple producers, there might not be any sync between their clocks. The only thing we know is sequential is within the same producer. 
+
+## Joining streams
+- stream-stream join:
+    - due to the possible delays between the two streams, we need to maintain some sort of state
+    - need to cache the events from one stream, in order to correlate them with the other stream's data
+
+- stream-table join:
+    - *enriches* the events with data from the database
+    - need to either look up information on each event, or keep a local copy of the data
+    - the local copy can quickly become stale, so we need to subscribe to the changes there as well; in effect, we're storing an up-to-date image of the database (or a subset of it) in the processor
+
+- table-table join:
+    - a social network that needs to deliver posts into users' timelines
+    - we care about the stream of tweets, as well as a stream of user relationship changes
+    - thw stream processor needs to maintain a database of followers for each user so it knowns which timelines it needs to update
+
+
+The ordering of events is very important in some scenarios, e.g. if you follow -> unfollow vs unfollow -> follow. This is hard to do across partitions, so we should group the events that relate to a user in a single partition. Perhaps userId would be a good way to shard the information to guarante the notificatons end up in the same partition.
+
+## Summary
+
+AMQP brokers (RabbitMQ):
+- assigns messages to consumers, which acknowledge once they have processed
+- **messages are deleted from the broker once ACKd**
+- good as an async version of RPC
+- exact order of messages doesn't really matter, and we don't need to go back once a message has been processed
+
+Log-based (Kafka):
+- all messages in a partition are assigned to the same consumer group
+- messages are always delivered in the same order as they are received
+- parallelism is done through multiple partitions
+- consumers track their progress via the offset of the last message they processed
+- **messages are retained on disk**, so it can be used a store

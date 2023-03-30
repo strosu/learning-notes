@@ -5,7 +5,40 @@ My notes on Martin Kleppmann's book, with some personal additions on the topics 
 Contents
 ========
 
+ * [Distributed consensus](#distributed-consensus)
  * [Stream processing](#stream-processing)
+
+ # Distributed consensus
+
+## Raft
+
+A good visualization here: - https://thesecretlivesofdata.com/raft/
+
+Data replication:
+- nodes can be in one of the three states: *Master*, *Follower*, or *Candidate*
+    - one node is the master, while the other ones are followers
+    - the master receives all write requests
+
+Leader election:
+- all nodes start as followers
+- once a follower hasn't received a heartbeat / **Append entry** from the master for a variable amount of time, it starts a new election by increasing the term index and voting for itself
+- when a node receives a voting request for a term, it votes for the candidate it, unless it already voted in the same term
+- the node that gets an absolute majority of the votes is declared the master (so we cannot have more than one)
+- if no node gets a majority, they try again. The odds of coliisions are reduced by having variable times for neach node:
+    - the *election timeout* represents how long a node waits until it decides to start an election (by becoming a candidate): 150-300ms
+- a node will only step down when another node is decleared a leader in a following term, e.g.
+    - the current master leads term X
+    - due to a network partition, a majority of the other nodes had an election and a new leader was elected (without a majority, they wouldn't have been able to)
+    - the initial leader receives an Append entry notification from term X + 1 (or higher), in which case it steps down as a follower
+
+
+Writing / log replication:
+- the values are added to the log, but it is not committed
+- the new value is sent to all the followers via the heartbeats
+- once a follower receives a write operation, it appends it to its log (still uncommited)
+- once the master receives a majority of acknowledgements :
+    - it commits the value to its log and returns success
+    - notifies the followers they should also commit. This is basically a Two Phase Commit
 
  # Stream processing
 
@@ -219,3 +252,108 @@ Log-based (Kafka):
 - parallelism is done through multiple partitions
 - consumers track their progress via the offset of the last message they processed
 - **messages are retained on disk**, so it can be used a store
+
+
+## Kafka
+
+Use when you need:
+- at least once delivery
+- message ordering
+- replayability
+
+## RabbitMQ
+- a message broker, used to deliver information to subscribers/consumers
+
+# Distributed Task Queue
+
+Notes taken from https://www.youtube.com/watch?v=TTNJKt4I9vg
+
+Collaborative environment
+    - people need to see each other's pointers for example
+    - OK to lose soms of the data, as we'll get a new point very soon
+    - good example for AMQP, as:
+        - the data needs to be fanned out to all participants
+        - we don't care about ordering
+
+Web crawler:
+    - relies heavily on queues for which URLs to process next
+
+Functional requirements:
+- decouple the production and the execution of the tasks for a cleaner design
+
+Scheduling:
+
+    - add a task, perhaps with a priority
+    - ask for a task from the queue
+
+Retry policies:
+    - try 3 times on at least 2 nodes, send to another system if processing still fails
+
+Reoccurring jobs:
+    - jobs that must be done regularly, e.g. at midnight every night
+
+Mnitoring and observability:
+    - get the status of a task that was queued
+    - measure the length of the queue
+    - measure queue length evolution over time, alert if pressure starts to build up
+
+Durability and availability:
+    - persist the tasks so they don't get lost in case of failure (use a DB?)
+    - avoid double processing (use a lock?)
+    - in practice, these are usually not hard requirements - crawling a page twice or skipping it, probably no loss
+
+Task dependencies:
+    - do this AFTER this other task has finished (e.g. image/video processing)
+    - this scheduling should be done in the task schedulet itself
+
+Task priorities:
+    - assume the workers are running at near capacity all the time
+
+Scheduling parameters:
+    - a task needs certain resources, e.g. run on a particular type of worker
+
+Availability and resilience:
+    - looking at distributed consensus
+    - if less than half the machines die, business as usual
+    - if more than half die, no way to ensure consistency - we don't know if the other set is alive but can't be reached by the master. If it's still alive, it should be the one doing the processing (as it has more nodes). A solution here is to stop accepting writes, but continue serving reads
+
+Exactly once:
+- replace "run exactly once" with "have a single side effect". For example, any user facing outputs shouold not be duplicated, such as sending emails, transactioning twice etc.
+- require idempotency tokens - don't allow executing the same action twice
+    - frontend generates the token and adds it to the request
+    - the server marks which tokens have already been seen; if it's a duplicate, ignore the current request
+    - downside: the token storage place cannot be sharded
+        - is this true? Perhaps the tokens can be generated via a mechanism that will allow sharding, e.g. take the first letter of the user and randomly generate the rest. This would ensure multiple requests from the same user (which have a possibility of being duplicates) end up on the same shard
+
+- fencing tokens:
+    - single task should result in a single action being taken; if you need more steps, e.g. send email AND do something else, break it into multiple tasks
+    - actions producing a side effect get assigned an increasing token number
+    - when the action itself needs to be performed, send the worker the token as well
+    - store the token in a durable place, which becomes the source of truth
+        - either rght before executing the side effect action, or directly in the other service performing the action, check against the task queue to see if the token is still valid
+        - if the operation was reassigned, the database should have been updated and we can avoid performing the action twice (e.g. sending money around)
+
+## Worker API
+
+Relevant points: 
+    - ease of management for the workers, allowing adding or removing them on the fly (although it's outside of the scope for a distributed task queue)
+    - large inputs should not be sent via the queue itself; instead we can store them remotely (S3 etc.) and pass a reference to that object
+    - logs should be stored in a distributed storage system for auditing and debugging purposes (S3)
+
+Push vs Pull:
+    - if a small amount of tasks that take longer, pull is ok (video processing)
+    - otherwise, push is needed
+    - might want to assign tasks in batches
+    - how does queue know which workers are alive? If a worker dies, you need to redistribute the tasks it took but didn't finish to other instances
+        - just because we don't hear from a worker doesn't mean it didn't process; might just be busy and come back later saying it was finished
+
+## Design
+
+- big discrepancy of resources between the task qeuue and the processing nodes
+- essential to keep the nodes themselves as busy as possible, i.e. not have one doing the work while the other ones idle
+
+- AMQP can be used for smart distribution to consumers
+    - need another layer for persistence, as RabbitMQ is not well suited for that
+
+- Can use Kafka as a source of truth instead of the DB
+    - durability and distributed consensus just work

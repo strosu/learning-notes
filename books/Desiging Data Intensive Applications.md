@@ -5,10 +5,62 @@ My notes on Martin Kleppmann's book, with some personal additions on the topics 
 Contents
 ========
 
+ * [Storage and retrieval](#storage-retrieval)
  * [Distributed consensus](#distributed-consensus)
  * [Stream processing](#stream-processing)
 
- # Distributed consensus
+# Storage and retrieval
+
+A database needs to do two things: persists some value when you write to it, and return that value later when queried.
+Two main approaches:
+- log based storage
+- page oriented storage
+
+## Log based storage
+ 
+- uses a **log**, which is an append only file
+- all the writes happen at the end of a file, so they are very cheap, compared to random disk seeks
+- results in an append only sequence of records
+- writes is O(1), however reads are O(N), where N is the number of records
+- to optimize for reads as well, we need an additional structure, known as an **index**. This stores some additional metadata, which helps us locate the data we want faster
+- maintaining addtional structures impacts the performance of writes, as they need to be updated when the data changes
+- databases usually don't index everything by default, but instead let the developer chose indexes manually
+
+### Hash Indexes
+
+- can be used for key-value storage, similarly to a dictionary
+- we append the keys and values to the log
+- the in memory dictionary also stores the offset of the key-value pair in the log file
+- writes are still O(1), while reads also become O(1)
+- can come in handy for a system that receives many writes, but over a relatively small set of keys. For example, storing view counters for videos, etc, where the number of events is greater by an order of magnitude or more compared to the number of keys (the videos themselves)
+
+Continuously appending to the file will eventually result in the disk getting full. To prevent this, we need to compact the logs:
+
+- when a segment reaches a certain size, mark it as closed and start a new one
+- previously closed segments are **compacted**:
+    - segments themselves are no modified, so we create a new file
+    - this file only stores the most recent change for a particular key; in our case, the change itself reflects the entire entity (no partials)
+    - thus, it is safe to only keep the most recent value and older ones can be discarded
+    - once the merger is complete, reads can address the resulting object and old ones are simply deleted
+    - this is done by a background thread, so reads and writes can proceed *normally*. However, as they are sharing the same resources (mostly disk bandwidth), eventually the background operations might slow down customer facing requests
+- when reading, we check the most recent's file hash index
+    - if the value is present, we simply use the offset to return it
+    - otherwise, move to the next older hash index
+
+Deleting records - since we can't modify previous values, a special record named a *tombstone* is used. This is then interpreted during the compaction as an instruction to discard all values for that key.
+
+Crash recovery:
+- by being in memory, the hash index can be lost
+- it can be restored by reading the entire log, but it's an expensive process
+- instead, flush it to disk regularly and load from there
+
+Downsides of hash indexes:
+- the need for additional space to store the index. This can become a problem if the hash table is too large to store in memory
+- range queries are not very efficient, as you can't perfom efficient range queries against a dictionary
+
+### SSTables and LSM-trees
+
+# Distributed consensus
 
 ## Raft
 
@@ -135,10 +187,10 @@ When dealing with data stored in multiple places:
 Change data capture
 
 The solution to the above problem is to introduce a leader and have the other systems follow its writes.   
-    - the master outputs a stream of changes, ideally as soon as they are written
-    - the stream is read by the consumers, which in turn apply those changes to their internal state
-    - as we care about the ordering, a log based system is ideal here: the master appends and the followers read sequentially
-    - two consumers that have the same offset should have the same view of the data
+- the master outputs a stream of changes, ideally as soon as they are written
+- the stream is read by the consumers, which in turn apply those changes to their internal state
+- as we care about the ordering, a log based system is ideal here: the master appends and the followers read sequentially
+- two consumers that have the same offset should have the same view of the data
 
 Log storage
 
@@ -180,9 +232,9 @@ Mutable state and an event log are two different views of the same data and are 
 Limitations of immutability:
 
 It might not be feasible to store all the changes done since the beginning of time. This depends on what the data looks like.
-    - if it's a small set that changes often, the stored data will quickly outgrow the size of the current state and immutability might not be the ideal solution
-    - if the data is mostly adds (e.g. sensor readings), immutability might works nicely
-    - data might nneed to be deleted for other reasons, e.g. administrative, legal (GDPR). With the log, we cannot really remove the previous entries, we can just make them harder to obtain via application code. Backups are immutable by design, it is not fesible to go and change them
+- if it's a small set that changes often, the stored data will quickly outgrow the size of the current state and immutability might not be the ideal solution
+- if the data is mostly adds (e.g. sensor readings), immutability might works nicely
+- data might nneed to be deleted for other reasons, e.g. administrative, legal (GDPR). With the log, we cannot really remove the previous entries, we can just make them harder to obtain via application code. Backups are immutable by design, it is not fesible to go and change them
 
 
 ## Processing streams
@@ -266,56 +318,55 @@ Use when you need:
 
 # Distributed Task Queue
 
-Notes taken from https://www.youtube.com/watch?v=TTNJKt4I9vg
+Some things to consider when designing a distributed task queue. Notes taken from https://www.youtube.com/watch?v=TTNJKt4I9vg
 
 Collaborative environment
-    - people need to see each other's pointers for example
-    - OK to lose soms of the data, as we'll get a new point very soon
-    - good example for AMQP, as:
-        - the data needs to be fanned out to all participants
-        - we don't care about ordering
+- people need to see each other's pointers for example
+- OK to lose soms of the data, as we'll get a new point very soon
+- good example for AMQP, as:
+    - the data needs to be fanned out to all participants
+    - we don't care about ordering
 
-Web crawler:
-    - relies heavily on queues for which URLs to process next
+Web crawler - relies heavily on queues for which URLs to process next
 
 Functional requirements:
 - decouple the production and the execution of the tasks for a cleaner design
 
 Scheduling:
-
-    - add a task, perhaps with a priority
-    - ask for a task from the queue
+- add a task, perhaps with a priority
+- ask for a task from the queue
 
 Retry policies:
-    - try 3 times on at least 2 nodes, send to another system if processing still fails
+- try 3 times on at least 2 nodes, send to another system if processing still fails
 
 Reoccurring jobs:
-    - jobs that must be done regularly, e.g. at midnight every night
+- jobs that must be done regularly, e.g. at midnight every night
 
 Mnitoring and observability:
-    - get the status of a task that was queued
-    - measure the length of the queue
-    - measure queue length evolution over time, alert if pressure starts to build up
+- get the status of a task that was queued
+- measure the length of the queue
+- measure queue length evolution over time, alert if pressure starts to build up
 
 Durability and availability:
-    - persist the tasks so they don't get lost in case of failure (use a DB?)
-    - avoid double processing (use a lock?)
-    - in practice, these are usually not hard requirements - crawling a page twice or skipping it, probably no loss
+- persist the tasks so they don't get lost in case of failure (use a DB?)
+- avoid double processing (use a lock?)
+- in practice, these are usually not hard requirements - crawling a page twice or skipping it, probably no loss
 
 Task dependencies:
-    - do this AFTER this other task has finished (e.g. image/video processing)
-    - this scheduling should be done in the task schedulet itself
+- do this AFTER this other task has finished (e.g. image/video processing)
+- this scheduling should be done in the task scheduler itself
+- perhaps a separate service that stores the dependency graph and pushes a task once all its prerequisites are done
 
 Task priorities:
-    - assume the workers are running at near capacity all the time
+- assume the workers are running at near capacity all the time
 
 Scheduling parameters:
-    - a task needs certain resources, e.g. run on a particular type of worker
+- a task needs certain resources, e.g. run on a particular type of worker
 
 Availability and resilience:
-    - looking at distributed consensus
-    - if less than half the machines die, business as usual
-    - if more than half die, no way to ensure consistency - we don't know if the other set is alive but can't be reached by the master. If it's still alive, it should be the one doing the processing (as it has more nodes). A solution here is to stop accepting writes, but continue serving reads
+- looking at distributed consensus
+- if less than half the machines die, business as usual
+- if more than half die, no way to ensure consistency - we don't know if the other set is alive but can't be reached by the master. If it's still alive, it should be the one doing the processing (as it has more nodes). A solution here is to stop accepting writes, but continue serving reads
 
 Exactly once:
 - replace "run exactly once" with "have a single side effect". For example, any user facing outputs shouold not be duplicated, such as sending emails, transactioning twice etc.
@@ -336,16 +387,16 @@ Exactly once:
 ## Worker API
 
 Relevant points: 
-    - ease of management for the workers, allowing adding or removing them on the fly (although it's outside of the scope for a distributed task queue)
-    - large inputs should not be sent via the queue itself; instead we can store them remotely (S3 etc.) and pass a reference to that object
-    - logs should be stored in a distributed storage system for auditing and debugging purposes (S3)
+- ease of management for the workers, allowing adding or removing them on the fly (although it's outside of the scope for a distributed task queue)
+- large inputs should not be sent via the queue itself; instead we can store them remotely (S3 etc.) and pass a reference to that object
+- logs should be stored in a distributed storage system for auditing and debugging purposes (S3)
 
 Push vs Pull:
-    - if a small amount of tasks that take longer, pull is ok (video processing)
-    - otherwise, push is needed
-    - might want to assign tasks in batches
-    - how does queue know which workers are alive? If a worker dies, you need to redistribute the tasks it took but didn't finish to other instances
-        - just because we don't hear from a worker doesn't mean it didn't process; might just be busy and come back later saying it was finished
+- if a small amount of tasks that take longer, pull is ok (video processing)
+- otherwise, push is needed
+- might want to assign tasks in batches
+- how does queue know which workers are alive? If a worker dies, you need to redistribute the tasks it took but didn't finish to other instances
+    - just because we don't hear from a worker doesn't mean it didn't process; might just be busy and come back later saying it was finished
 
 ## Design
 

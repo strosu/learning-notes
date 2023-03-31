@@ -5,7 +5,7 @@ My notes on Martin Kleppmann's book, with some personal additions on the topics 
 Contents
 ========
 
- * [Storage and retrieval](#storage-retrieval)
+ * [Storage and retrieval](#storage-and-retrieval)
  * [Distributed consensus](#distributed-consensus)
  * [Stream processing](#stream-processing)
 
@@ -59,6 +59,53 @@ Downsides of hash indexes:
 - range queries are not very efficient, as you can't perfom efficient range queries against a dictionary
 
 ### SSTables and LSM-trees
+
+[TODO - add SSTable image]
+
+Instead of storing the records in the order in which they arrive, we can store them sorted by the key. 
+
+Advantages:
+- log compaction is much simpler:
+    - very similar to merge sort
+    - we have several sorted sets that need to be merged
+    - at each step, compare their heads
+    - if it's a duplicate, just keep the latest value (from the latter segment)
+    - otherise, add the value to the compacted log
+- instead of keeping all the offsets in memory, we can keep a very sparse set
+    - if the key we're looking for is in the set, we're done
+    - otherwise, find it's smallest/largest neighbor, which gives you a start and an end in which the value can reside
+    - scan the range (either linearly, or vinary search if feasible etc)
+    - each of the entries in the in memory hashset can point to the start on a segment; thus, the search will tell us the right segment containing our value (if any)
+
+Thus, an SSTable is a disk structure, consisting of:
+- the data itself (ordered by key)
+- an index from keys to their offsets in the file
+- a bloom filter of the data in the SSTable. This allows us to quickly (and with very little overhead) to check if a value is present in the SSTable
+
+How an LSM tree works:
+
+- when a writes comes in, it's stored in an append only log. This is done to protect against crashes, when the in-memory data would be lost
+    - it is only used for restoring the node and is compacted / garbage collected regularly
+- after it is persisted, it is added to an in-memory selef balancing tree (RedBlack tree etc) called a **memtable**
+    - this allows inserting in any order and retrieving the sorted set later on
+- when the memtable gets too big, it is flushed to disk and it creates a new SSTable   
+    - this file contains the sorted keys from the memtable, as wel as additional information we might want to write
+    - as we're writing to the disk sequentially, it can support a very large throughput
+- when a read arrives, try to serve it from the memtable
+    - if the key is present, we know it's the most recent value (as the time ordering from most recent to oldest is Memtable -> SSTable 1 -> SSTable 2)
+    - if the key is not present, look at the most recent SSTable, then the next one etc
+- from time to time merge older SSTables (fairly easy, see above advantages)
+
+## B-Trees
+
+[TODO - add B-tree image]
+
+- represent a type of page-oriented storage
+- keys are also stored in order, but the sets are broken down into fixed size blocks called *pages*
+- each page can be identified by its location, which allows other nodes to reference it, creating a tree of pages
+- each node can contain multiple values, in effect multiple ranges. For example. if the root stores 1, 3, 5, 10 and their addresses, the next layer will be a node containing values between 1-3, another for 3-5 and so on. This can be nested and it allows for searches similar to binary search
+- each node is responsible for a continous range of keys, but it might not be full. If a node can contain the values between 100-200, it might contain just some of them
+- the keys stored in the node itself act as boundaries
 
 # Distributed consensus
 

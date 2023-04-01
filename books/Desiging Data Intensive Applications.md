@@ -6,10 +6,12 @@ Contents
 ========
 
  * [Storage and retrieval](#storage-and-retrieval)
+ * [Replication](#replication)
  * [Distributed consensus](#distributed-consensus)
  * [Stream processing](#stream-processing)
 
 # Storage and retrieval
+---
 
 A database needs to do two things: persists some value when you write to it, and return that value later when queried.
 Two main approaches:
@@ -107,7 +109,119 @@ How an LSM tree works:
 - each node is responsible for a continous range of keys, but it might not be full. If a node can contain the values between 100-200, it might contain just some of them
 - the keys stored in the node itself act as boundaries
 
+- When reading, we traverse the tree in order to find the leaf storing the current value. 
+- When updaing a key, the approach for finding the key is similar to reading. Once the leaf is found, we change the value in the page and write it back to the disk. 
+- Adding a new key, we find the relevant page and append to it. If the leaf node does not have enough space, we split it into two and update its parent. This operation might need to bubble up, in which case we might end up needing to add an additional level (although that should happen rarely).
+
+As opposed to log based systems, we might need to modify several pieces of data as part of the same operation. The simplest example is splitting a page as above. The entire operation needs to be atomic, so lightweight locks are used for this. Additionally, in order not to end up in an inconsistent state, a **write-ahead-log** is also used. This is an apped only log file, to which every incoming operation needs to be added before being applied to the pages themselves. 
+
+## LSM vs B-tree comparision
+
+### LSM advantages 
+
+- LSM trees generally are faster to write to (as we're only appending), but slower to read from (as we need to query several SSTables)
+- In each of the systems, a single write command results in multiple actual disk writes:
+    - for B-trees, we write at least twice: once in the WAL and once in the tree itself, with an extra overhead for splitting pages
+    - for LSM trees, we write just once during the operation; however, the information itself is sometimes rewritten during log compaction. Not all entities will be rewritten, as some of them might be dropped due to newer data. The only way to determine what is best is to benchmark.
+- LSM trees are more compact, as B-trees might have unused portions of pages
+
+### B-trees advantages
+
+- for LSM trees, sometimes the background process of compaction can interfere with the incoming operations; they are in effect sharing the same resources (disk bandwidth)
+- log compaction can be incorrectly configured, in which case the rate at which operations are coming in is greater than the compaction rate; thi will result in more and more SSTables being created and we'll eventually run out of disk space
+- in a B-tree, a key only exists in a single place
+
+
+## Column oriented storage
+
+When some of the tables grow very large (tens of columns wide), it is rarely the case querie need to return entire rows. Instead they usually operate on a small set of columns.
+In OLTP databases, an entire row is stored as a contiguos set of bytes. This makes retrieving an entire row at once very efficient, but the entire row needs to be loaded in memory and parsed, only for most of it to be discarded later on.
+
+Instead, a column oriented database stores the values in a column together, e.g. in a separate file. Then, for each query, determine which subset of files is actually needed to return a response. 
+Each column file stores the entries in the same order, so we can take item N across multiple files and know it belongs to the same row. 
+
+Additionally, it is often the case that values in the same column but across different rows are repetitive. This is a very good use case for additional compression within the column file. For example. we might have 100M transactions, but across 1000 products being sold. Thus, there is a decoupling between the number of rows and the number of unique values. 
+
+Row ordering does not matter, as long as it's the same across column files. Two approaches emerge:
+- store the rows in the order in which they are added 
+- sort the values within some of the column files. The ordering needs to propagate across all the files, in order to continue relying on the fact that the Nth element in each belongs to the same row. Thus, chosing on which columns to order needs to take into account which types of queries we want to optimize. 
+    - by sorting across a column with few distinct values, we improve the compression, as all the repeated values will be next to each other
+
+When writing, it would be very inefficient to insert a row into a sorted table for example, as that would require rewriting ALL the column files.
+Instead, we can use an approach similar to LSM trees: store the latest requests in an append log and write them in whatever format we prefer later on, as a backend process (which does not care if it's a row or column based database, the same process applies).
+
+# Replication
+---
+
+Reasons for replication:
+- to make data more durables: if it's stored in just one location, that machine might fail
+- to increase availability: we want the system to continue working (ideally without the user noticing) even in the face of hardware or network failures
+- we want the system to be performant, so the data should live closer to the user when possible 
+
+Three main approaches:
+- **Single leader** replication
+    - one node is elected leader and process all the writes
+    - all the other nodes only process reads
+    - when a write request arrives, the follower nodes can redirect it to the leader
+    - in effect, the writes are serliazed
+    - the leader can return OK:
+        - as soon as it finishes, leading to eventual consistency (the read replicas are out of sync for a while, shorter or longer)
+        - once a majority of replicas have commited the message (two-phase commit)
+    - we need a mechanism for leader election in case it fails, see the section on Raft
+- **Multi leader** replication
+    - more than one node accepts writes
+    - offers more availability, at the price of consistency
+    - very hard to detect / fix concurrent writes, no silver bullet here
+    - data can be lost when deciding which version to keep
+- **Leaderless** replication
+    - clients send each read (*r*) and write(*w*) to all(*n*) nodes
+    - to guarantee reading up to date data, we need R + W > N (quorum consistency)
+        - for data that is very often read, set the R to 1 and the W to N - this means we return success only after writing to ALL replicas (with the relevant drawbacks when one goes down etc), while the reads are very fast
+        - for data that is often written, set W = 1 and R = N - this results in quick writes, but reading can be slow
+        - setting R + W > N guarantees at least one of the values we read is up to date
+        - some versioning mechanism is also required; this allows us to determine which value is the most up to date one if several are returned
+    - data can be reconciled on reads:
+        - when we see some replicas as being out of date as part of a read, set them to the right value; this has the drawback of leaving data as inconsistent for a long while for systems where some values are not read frequently
+    - vector clocks can be used to *try* to reconcile stale data; although the work most of the time, there are scenarios where we simply cannot automaticaly tell when an operation happened *before* another and manual intervention is required.
+
+Apparoches to replication lag:
+- read-after-writes: 
+    - users should always see data they submitted themselves
+    - for example: read user settings (tweets, etc.) for the current user from the replica that takes its writes; this ensures that if a change was done and is not replicated, we see it
+    - works when writes are deterministically split around replicas (e.g. you can only post changes to your profile on a single instance). 
+- monotonic reads:
+    - users should not see data jumping back and forth in time
+    - if all the queries for a user go to the same instance, this cannot happen
+
+## CRDTs
+
+Represent a family of structures that can be concurrently edited by multiple users. 
+These span various data types, such as dictionaries, sorted sets, lists, counters etc. Equivalent to ConcurrentCollections in .NET.
+Based on the classification above, this is a case of leaderless replcation: all replicas take writes and try to reconcile them at a later point in the future.
+
+Uses: online chat, shared file editing, collaboration software (Miro) etc. 
+
+**Examples: Redis, Riak**.
+
+The whole idea is for the different versions of a document (text, tasks etc.) to *converge*. That is, for the changes to resolve to the same version of the file across the different clients, while reflecting all the edits that have been made.
+
+An important distinction is whether the users can edit the document offline. If so, the set of changes that need to be reconciled can be very large (think a large change on a git branch). The larger the change set, the more difficult to merge them without conflicts
+
+Precursor: Operational Transform
+- translates every client operation into an insert or delete, **based on the index** in the file (character index)
+- the server then reconciles and translates operations receied from other clients. If, for example we insert at position 3 and another remote client inserts at position **5** originally, we'll get an update for inserting at positon **6**, which takes into account both operations
+- all communications need to go through a central server that reconciles operations
+
+Implementaition:
+- each character gets a unique identifier
+- assign each character an increasing fractional value between 0 (start of the document) and 1 (end of the document)
+- inserting a character between two other ones simply boils down to chosing a rational number between the two
+    - when inserting at different positons, it works out of the box
+    - however, we might get a mixture of the changes when they overlap in position.
+    - when generating random numbers for each positon, we can end up with interleaved text
+
 # Distributed consensus
+---
 
 ## Raft
 
@@ -140,6 +254,7 @@ Writing / log replication:
     - notifies the followers they should also commit. This is basically a Two Phase Commit
 
  # Stream processing
+ ---
 
  Characteristics: 
  - operates on unbound data, that is data arrives gradually and keeps on flowing through the system. This is oppoed to Batch processing, where the size of the data is bound and known at execution time. This is done by artificially dividing the time or data into chunks, e.g. every 1000 records or every day/minute etc. 
@@ -169,18 +284,18 @@ Two relevant aspects:
 
 ### Direct messaging
 
-Examples where no intermediares are used:
+Examples where no intermediaries are used:
 - UDP multicast
 - TCP/IP multicast
 - direct API calls through REST or RPC, if the customers support it; in effect a webhook, where consumers are notified of new data
 
-In general, the assumption is that both producer and consumers are online all the time. You can implement retries and other similar mechanisms, but the design is not very robust.
+In general, the assumption is that both producers and consumers are online all the time. You can implement retries and other similar mechanisms, but the design is not very robust.
 
 ### Message brokers
 
 - Represents an intermediary that both the producers and consumers connect to. Clients can come and go, the problem has now moved to the broker itself.
 - Some store the events only in memory, while others persist them
-- as opposed to direct cals, the system is now asynchronous. Usually the producer gets an success once the message has been processed by the broker, with little alternatives to be notified when the consumers get it.
+- As opposed to direct cals, the system is now asynchronous. Usually the producer gets a success response once the message has been processed by the broker, with few alternatives to be notified when the it reaches the consumers.
 
 Comparison with Databases:
 - DBs are persistent, whereas message brokers usually store messages until they are processed
@@ -193,6 +308,7 @@ Message delivery:
 
 Acknowledgements and retries
 - brokers wait for the consumers to ACK they received and processed the message; only then it is removed from the queue
+    - if a consumer picks it up and processes, but crashes before sending the ACK back, it will result in more-than-once processing, unless other measures are taken
 - when redelivery is combined with load balancing, a message can be reassigned to another consumer, but it will be out of order
 
 ## Partitioned logs

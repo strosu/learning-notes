@@ -220,6 +220,8 @@ Implementaition:
     - however, we might get a mixture of the changes when they overlap in position.
     - when generating random numbers for each positon, we can end up with interleaved text
 
+![crdt interleaved](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/crdt_interleaved.png)
+
 # Distributed consensus
 ---
 

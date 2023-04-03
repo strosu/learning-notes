@@ -7,6 +7,8 @@ Contents
 
  * [Storage and retrieval](#storage-and-retrieval)
  * [Replication](#replication)
+ * [Partitioning](#partitioning)
+ * [Transactions](#transactions)
  * [Distributed consensus](#distributed-consensus)
  * [Stream processing](#stream-processing)
 
@@ -62,7 +64,7 @@ Downsides of hash indexes:
 
 ### SSTables and LSM-trees
 
-[TODO - add SSTable image]
+![SSTable](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/sstable.png)
 
 Instead of storing the records in the order in which they arrive, we can store them sorted by the key. 
 
@@ -100,7 +102,7 @@ How an LSM tree works:
 
 ## B-Trees
 
-[TODO - add B-tree image]
+![SSTable](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/btree.png)
 
 - represent a type of page-oriented storage
 - keys are also stored in order, but the sets are broken down into fixed size blocks called *pages*
@@ -195,6 +197,8 @@ Apparoches to replication lag:
 
 ## CRDTs
 
+*Information and images taken from https://www.youtube.com/watch?v=PMVBuMK_pJY*
+
 Represent a family of structures that can be concurrently edited by multiple users. 
 These span various data types, such as dictionaries, sorted sets, lists, counters etc. Equivalent to ConcurrentCollections in .NET.
 Based on the classification above, this is a case of leaderless replcation: all replicas take writes and try to reconcile them at a later point in the future.
@@ -221,6 +225,87 @@ Implementaition:
     - when generating random numbers for each positon, we can end up with interleaved text
 
 ![crdt interleaved](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/crdt_interleaved.png)
+
+# Partitioning
+
+The main reason for partitioning data is for scalability. Different partitons can be placed on separated *share-nothing* nodes. This allows us to distribute both the data and the queries across different machines, increasing throughput.
+
+Paritioning is usually combined with [Replication](#replication). The data belongs to a single node, but it is replicated across others for faul tolerance. 
+
+## Partitioning key-value data
+
+When deciding how to split the data, we ideally want to make it as even as possible (assuming the nodes all have the same capacity). Otherwise, the workload will be skewed.
+
+### Partitioning by key
+
+Similarly to an encyclopedia, which groups topics by their first letter in volumes, we can assign a continuous range of keys to a partition. Thus, each partition has a minimum and a maximum and we can easily tell which partition contains a certain piece of data the query is looking for.
+
+Furthermore, we can store the data inside partitions in an ordered fashion. Thus, searcing inside them will be fast. This is similar to an [SSTable / LSM-tree](#sstables-and-lsm-trees). 
+
+### Partitioning by hash of the key
+
+We need a function that will return an even distribution across the partition and, furthermore, return the same value for the same key on every call. This is different than how C#/Java do it, where different proceeses will give a different hashCode for the same object. 
+
+Each partition takes an interval of hashes, resuling in something similar to consistent hashing. 
+One downside is the fact that adjacent values are now spread across partitions, as we have no guarantee for the hashed values being adjacent as well. In effect, range queries now need to be sent to all the partitions. This is opposed to partitioning by key, where we would know exactly in which partition(s) the results might reside.
+
+A solution is to store data that we want to easily query in the same partiton. For example, we store all the updates from a user within the same partition, e.g. (user_id, post_timestamp). This way, we need to scan a single partition when looking for posts from a certain range.
+
+## Seconday indexes
+
+Once the data is split into partitions, we can support fast queries related to the key on which it was split. If we want to add seconday indexes, we also need to track data in a different format. 
+For example, if our objects are cars, we partition by ID and have cars with different colors spread out across the partitions. To allow querying for color, we need to build a structure that will tell us which car IDs correspond to the current query.
+
+This dictionary needs to be split across partitions as well. There are two ways of structuring it:
+- each partition stores a representation of the car colors inside it.  
+    - when adding a new car, it is cheap to keep this seconday index up to date as all the data lives on the same node
+    - when querying, we need to look at ALL the nodes, as any of them might contain cars with the current color
+    - this is called a **local index** or **document-partitioned index**
+- each partition stores a part of a global index
+    - say partition 1 stores references to all red cars, while partition 2 stores references to all silver cars
+    - inserting is very expensive, as a write might be spread across different nodes. This is exacerbated when we're building multiple indexes
+    - queries are very fast, as we're only looking at a single partition to get all red cars
+    - this is called a **global index** or **term-partitioned index**.
+    - updates to a global secondary index are usually async, as the change needs to propagate to the other nodes
+
+# Transactions
+
+Traditionally described as ACID, it boils down to two main properties:
+    - atomicity: when multiple rows need to be changed, either all of them are changed, or none
+    - isolation: an operation recived while other transactions are running will not see their data
+    - consistency doesn't really mean anything
+    - durbility is evident - data needs to be persisted; this is also relative, as nothing is really "durable" - an entire datacenter can be wiped off, harddisks lose information eventually etc
+
+## Atomicity
+
+## Isolation
+
+## Serialization
+
+One fairly recent way of avoiding all the pitfalls of concurrency is to just serialize all write operations in a single thread. If the entire working set is in memory, this operation is very fast; 
+Alternatively, we can shard the data into independent partitions and have each shard with its own serialized writer. 
+
+If the types of queries are known in advance, they can be persisted as Stored Procedures inside the DB, which should make each of them faster to execute (and increase the write throughput of the overall system)
+
+## Two-Phased Locking
+
+Normally we want writes and reads to not block each other. Thus, locks are acquired when we want to change the data, not when reading. This however requires snapshot isolation, so that other operations don't see stale data. 
+Several reads can go through simultaneously, as long as nobody wants to write to the row. When that happens, we acquire an exclusive lock and block all other reads as well. This prevents them from getting partially modified data. 
+
+Implementation:
+- each object in the database has its own lock
+- the lock can either be in **shared mode** or **exclusve mode**
+- shared mode mdeans multiple *read* transactions can acquire it at the same time; however, they must wait if another has it in exclusive mode
+- when a write transaction comes in, it tries to acquire the lock exclusively - **no other** transaction can hold it at the same time, either exclusively or shared. Otherwise, the current transaction must wait. 
+- once a lock is acquired by a transaction, **it is held until complete or aborted**.  
+
+The database automatically detects deadlocks and aborts one of the transactions in order to resolve it.
+
+## Optimistic locking
+
+Both Serialization and 2PL are pesmisstic algorithms - they offer a strong guarantee by taking the worst case for every transaction. While this results in no conflicts, it is also slow.
+
+Another aproach is to allow multiple transactions to go through, and check if another conflict one happened before committing. If so, the latter one is simply aborted (and retried).
 
 # Distributed consensus
 ---

@@ -15,6 +15,12 @@ Contents
  * [Distributed consensus](#distributed-consensus)
  * [Stream processing](#stream-processing)
 
+Particular implementations
+========
+
+ * [Distributed Task Queue](#distributed-task-queue)
+
+
 # Storage and retrieval
 ---
 
@@ -272,6 +278,7 @@ This dictionary needs to be split across partitions as well. There are two ways 
     - updates to a global secondary index are usually async, as the change needs to propagate to the other nodes
 
 # Transactions
+---
 
 Traditionally described as ACID, it boils down to two main properties:
     - atomicity: when multiple rows need to be changed, either all of them are changed, or none
@@ -332,7 +339,9 @@ Both Serialization and 2PL are pesmisstic algorithms - they offer a strong guara
 
 Another aproach is to allow multiple transactions to go through, and check if another conflict one happened before committing. If so, the latter one is simply aborted (and retried).
 
+
 # Problems with distributed systems
+---
 
 Locally running processes work under faily well defined conditons. Additionally, when something goes wrong, the application is allowed to fail (e.g. blue screen) rather than give back bad results. 
 
@@ -364,10 +373,35 @@ One workaround to the fact that getting a check against a lease is not enough is
 - this prevents a server from accidentally performing a write it shouldn't
 - however, the assumption is **there are no malicious servers**. 
 
-![Fencing tokens](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/sstable.png)
+![Fencing tokens](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/fencing_tokens.png)
 
 # Distributed consensus
 ---
+
+## Linearizability
+
+A storage system is linearizable if it *behaves as if we have a single copy of the data*. Some guarantees include:
+- that once a write has finished, the new value will be returned to al subsequent reads
+- that once a read operation has returned a value, following ones will not return the old one anymore
+
+Some systems when linearizability is essential:
+- locking and leader election - all readers must agree whether a lock is taken or not
+- uniqueness - in places where a value can only be used once (e.g. unique usernames), the system nodes must all agree if it is taken
+- financial transactions - the need for an accout balance not to go below 0
+- when data is passed between systems via multiple channels. For example, if we store an object into storage and pass its ID via a queue, it is essential for the receiving system to get it back via storage when querying via the ID. 
+
+![Race condition if not linearizable](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/linearizable-race-condition.png)
+
+Based on the potential approaches for [replication](#replication), we have the following: 
+- **single leader** - potentially linearizable
+- **consensus algorithms** - linearizable
+- **multi leader** - not linearizable by design, as multiple instances can process different writes at the same time
+- **leaderless** - not linearizable, e.g. Dynamo
+    - since we only need a partial consensus (usually not all the nodes need to receive the update), we can get stale data on every read
+
+## Zookeeper
+
+TODO - ADD
 
 ## Raft
 
@@ -626,6 +660,7 @@ Use when you need:
 - a message broker, used to deliver information to subscribers/consumers
 
 # Distributed Task Queue
+---
 
 Some things to consider when designing a distributed task queue. Notes taken from https://www.youtube.com/watch?v=TTNJKt4I9vg
 

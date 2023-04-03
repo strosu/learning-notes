@@ -1,6 +1,8 @@
 # Designing Data Intensive Applications
 
 My notes on Martin Kleppmann's book, with some personal additions on the topics he explores.
+The notes are by no mean exhausitve and skim over areas that I find obvious based on my experience, so YMMV. 
+Images are taken from the book and from online talks by Martin Kleppmann. 
 
 Contents
 ========
@@ -9,6 +11,7 @@ Contents
  * [Replication](#replication)
  * [Partitioning](#partitioning)
  * [Transactions](#transactions)
+ * [Problems with distributed systems](#problems-with-distributed-systems)
  * [Distributed consensus](#distributed-consensus)
  * [Stream processing](#stream-processing)
 
@@ -276,11 +279,33 @@ Traditionally described as ACID, it boils down to two main properties:
     - consistency doesn't really mean anything
     - durbility is evident - data needs to be persisted; this is also relative, as nothing is really "durable" - an entire datacenter can be wiped off, harddisks lose information eventually etc
 
-## Atomicity
+To determine which operations are part of the same transaction, boundary messages need to be included (e.g. BEGIN TRANSACTION and COMMIT)s
 
-## Isolation
+## Snapshot isolation
 
-## Serialization
+The idea is for every transaction to read from a *consistent* view of the database. This is essential for longer runnng operations, for example backups - we want to back up the state of the database at a certain point in time, with no partial modifications (which can be done wile the backup query executes).
+
+Internal implementation:
+- each transaction gets an increasing ID
+- the databse keeps multiple copies of the same object in its representation
+- each update results in a delete and create; in effect, version N is marked as deleted by transaction X and version N + 1 is marked as created
+
+Ensuring consistency:
+- when a transaction comes in, the DB makes a list of all the other executing transactions
+- any writes made by transactions in the list are ignored, even if they are applied by the time the current transaction would read. Thus, simply reading all updates made by IDs smaller than the current one would leave us with edge cases
+
+Updating indexes:
+- for systems that use [B-trees](#b-trees), we need to update the values from the current leaf up to the parent
+- instead of overwriting the values, we simply create a new copy that is modified before being written
+- the other unmodified pahts through the tree are left as immutable
+- by keeping the copies, we also have a versioning system for the index; every version of the database has its own root, which can be used to get a consistent view of the database at a point in time
+
+## Atomic writes
+Ideally the database would offer built in support for some of them. For example, incrementing a value by 1 (similar to Interlocked.Increment in C#).
+
+Some operations have better built in support, where we can manually lock a set of results being returned by a query. For example, if we want to perform a write operation based on the count of a previous read, we mark the set being returned as *FOR UPDATE*, which should lock other transactions from modifying it until we are done.
+
+## Serializability
 
 One fairly recent way of avoiding all the pitfalls of concurrency is to just serialize all write operations in a single thread. If the entire working set is in memory, this operation is very fast; 
 Alternatively, we can shard the data into independent partitions and have each shard with its own serialized writer. 
@@ -306,6 +331,40 @@ The database automatically detects deadlocks and aborts one of the transactions 
 Both Serialization and 2PL are pesmisstic algorithms - they offer a strong guarantee by taking the worst case for every transaction. While this results in no conflicts, it is also slow.
 
 Another aproach is to allow multiple transactions to go through, and check if another conflict one happened before committing. If so, the latter one is simply aborted (and retried).
+
+# Problems with distributed systems
+
+Locally running processes work under faily well defined conditons. Additionally, when something goes wrong, the application is allowed to fail (e.g. blue screen) rather than give back bad results. 
+
+As opposed to this, it is inevitable to encounter failures (and do so oftely) in a distributed system. 
+
+## Main causes
+
+- Separate nodes talk to each other over a network that offers few guarantees by design (ethernet). We can never know for sure if a packet will arrive at a destination and if we'll get them message back. 
+    - Packet routing can not just lead to messages/responses being lost, but it can take a nondeterministic amount of time to get an answer (during which we migth wrongly declare nodes as dead). Additionally, we can never tell if it's a problem with the receiver, or perhaps the current node has been taken offline. 
+
+- Clocks can never be trusted
+    - time of day clocks are usually kept in sync via NPT (a set of servers). This can force a node to set its clock to a time in the past if it's running too fast, resulting in events arriving at the same node to have the wrong chronological order
+    - monotonous clocks are better, but they have no meaning outside of the same node
+
+- Processes can be suspended for an arbitrary amount of time at any point, without being able to tell it happened
+    - Garbage collection can take a long time
+    - the current CPU might be saturated, so it would take a long time to get allocated a new slice, etc. 
+    - Operations where we check something time based are very sensitive to this. For example: if we want to do an operation based on how long our lease is on an object, we need to:
+        - check the time first
+        - perform the operation
+        - however, the process might have been suspended for a long time between the two, resulting in a bad state
+
+## Fencing tokens
+
+One workaround to the fact that getting a check against a lease is not enough is to use *fencing tokens*. 
+- a server that wants to perform a write operation obtains an increasing token from a lock service
+- the token is passed to the storage engine
+- the engine rejects operations for which it has seen a larger token
+- this prevents a server from accidentally performing a write it shouldn't
+- however, the assumption is **there are no malicious servers**. 
+
+![Fencing tokens](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/sstable.png)
 
 # Distributed consensus
 ---

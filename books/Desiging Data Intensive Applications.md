@@ -13,7 +13,10 @@ Contents
  * [Transactions](#transactions)
  * [Problems with distributed systems](#problems-with-distributed-systems)
  * [Distributed consensus](#distributed-consensus)
+    * [Raft](#raft)
+    * [Zookeeper](#zookeeper)
  * [Stream processing](#stream-processing)
+    * [Distributed task queue](#distributed-task-queue)
 
 Particular implementations
 ========
@@ -399,9 +402,89 @@ Based on the potential approaches for [replication](#replication), we have the f
 - **leaderless** - not linearizable, e.g. Dynamo
     - since we only need a partial consensus (usually not all the nodes need to receive the update), we can get stale data on every read
 
-## Zookeeper
+## Ordering guarantees
 
-TODO - ADD
+Operations needs to be executed in a particular order, for example *the order in which they were performed*. This is a relative concept, given an operation is not instantaneous, network delays occurr etc.
+
+Some discussed approaches:
+- single leader replication: the leader determines the order of writes, thus the order in which followers apply those writes
+- serializability for transactions (making it appera they are run serially): either by executing transactions in series, or by preventing conflicts for simultaneous operations (via locking certain rows for reading/writing)
+- using timestamps (for LWW - Last Write Wins) or vector clocks, to try and determine which operation came in *before* another
+
+The goal is to preserve **causality** between operations (both read and write) - cause comes before effect, just like in real life. For example, snapshop isolation provides this *causal consistancy*, as you can see all the data that was written before your read (assuming it was not deleted ofc).
+
+As a side note, causality < linearizability. That is, some operations are ordered in relation to each other, but, for incomparable operations, we don't know anything about their ordering. In a linearizable system, nothing is concurrent - every operation is put on a timeline and there is an absolute ordering of operations. 
+
+## Sequence number ordering
+
+Using incrementing sequence numbers (unrelated to time-of-day clocks) can offer some image of whether an operation came before another. 
+For a single-leader system, it can generate this sequence and assign each number to the operation in its replication log. 
+
+When multiple nodes are generating sequence numbers, we cannot get consistent ordering between different instances (e.g. a partition within Kafka is ordered, but this doesn't hold across partitions). 
+
+Lamport clocks can be used to provide causal ordering between different nodes [TODO - deeper dive into this]
+
+## Total order broadcast
+
+Total order broadcast has two defining properties:
+- no messages are lost; if delivered to one node, it will be delivered to all of them
+- messages are delivered to every node in the same order
+
+For database replication, this is essential. If every replica processes the same messages in the same order, it will eventually be in sync with all the other instances. 
+The order is determined at the moment of brodcasting, a node cannot go back in time and insert another message. 
+Total order broadcast can be used for generating [fencing tokens](#fencing-tokens). Every request to acquire the lock is appended to the log (if successful) and its sequence number is the fencing token. A node waking up later and trying to use the old fencing token will have its requests rejected, as it's no longer the latest.  
+
+### Linearizable storage from total order broadcast
+
+For a simple example of generating unique usernames, we can do the following :
+- insert a message requesting we register the username into the append only log
+- read the log from the beginning (or from snapshots etc) until we find a message requesting an insertion for our username
+- if the message is the one we generated, proceed. Otherwise, abandon the operation
+
+This provides consistency for writes. To achieve the same for reads:
+
+- before reading, append a read message to the log. This defines the moment in time at which the read was requested
+    - read all messages until finding the one we inserted
+- if we can get the latest entry ID reliably (perhaps from the master), wait until you have read all the entries up to that ID and then perform the read
+- make the read from a replica that is up to date (normally the leader). Amazon DynamoDB does this via Strongly Consistent Reads 
+    - this has the drawback of not working if the leader is down
+
+### Total order broadcast from linearizable storage
+
+- Since we have linearizable storage, we can use an integer that is atomically incremented
+- This will be the sequence number attached to each message
+- we send the messages to all nodes (resending all lost messages)
+
+## Two Phase Commit (2PC)
+
+The goal is to provide an atomic transaction across multiple nodes: either all of them have the updated data, or none do.
+As opposed to single node transactions, this can be used to synchronize different services together. For example, writing a row in a database, and putting an ACK message in a queue can happen atomically if the underlying systems support transactions. This can be used to guaranteed exactly-once, as long as the systems don't have side effects (e.g. sending an email). 
+
+Once a transaction is committed, it becomes visible to all other requests, just like in a relational system. Thus, we cannot go back and change it, as other operations might have already done something based on the new data. 
+
+![2PC](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/2PC.png)
+
+To make the algorithm work, we need a new role, the **Coordinator**. This can be a separate service, but can also live within the client as a library. 
+
+Steps:
+- too coordinator generates a unique Transaction ID for each write
+- operations are performed against the different nodes, but nothing is commited yet
+    - each node checks if it can perform the operation and acquires the required locks
+- the coordinator proposes making a commit and sends a *prepare* message to all the other nodes
+    - if a node confirms it can commit, it commits to doing so whenever told by the coordinator (it cannot change its mind later)
+        - this should happen under all circumstances, so it needs to write the transaction data to the disk for cases when it would die mid operation
+    - NOTE: once a node confirms it is prepared, it will wait indefinitely for a commit or abort message. It cannot decide on its own to cancel or proceed, as other nodes might have received the command and would get out of sync
+- if all nodes agree:
+    - the coordinator writes to its WAL that the transaction is commited - this is called the *commit point*
+    - sends a notification to all the nodes for them to commit
+    - if a notification fails, the coordinator must retry forever, lest the node get out of sync with its peers. Thus, the decision NEEDS to be enforced on all the nodes.
+    - once a node commits, it releases the locks it held for the operation
+- if some nodes decline, the transaction is aborded and the leader notifies all the instances
+    - the instances then roll back the transaction, release the locks etc.
+
+
+IMPORTANT: The main drawback is introducing the coordinator as the single point of failure. Furthermore, if the coordinator dies before sending the commit message to some of the nodes, these will be stuck waiting for it to start back up. In the meantime, they are holding locks on rows which can lead to significant degradation. If the coordinator does not come back, a manual intervention is required to get the nodes out of the bad state. 
+
 
 ## Raft
 
@@ -429,9 +512,29 @@ Writing / log replication:
 - the values are added to the log, but it is not committed
 - the new value is sent to all the followers via the heartbeats
 - once a follower receives a write operation, it appends it to its log (still uncommited)
-- once the master receives a majority of acknowledgements :
+- once the master receives a majority of acknowledgements:
     - it commits the value to its log and returns success
     - notifies the followers they should also commit. This is basically a Two Phase Commit
+
+## Zookeeper
+
+- Stores a small amount of data in memory, while writing it to the disk for persistence. 
+- The data is replicated across several nodes using a fault-tolerant total order broadcast algorithm. 
+
+Features:
+- locks via an atomic compare-and-set operation: if multiple clients try to perform the same operation at the same time, only one will succeed. 
+    - this is a distributed lock, combined with a *lease* (similarly to Azure blob storage)
+    - **sequence nodes** are used for this
+- can provide [fencing tokens](#fencing-tokens), since each operation has a monotonously increasing ID and version number
+- the clients and server exchange heartbeats, so it can be used for failure detection
+- can be used for *service discovery* - that is, telling services where they can find other services
+    - since ephemeral nodes are removed when a client disconnects / times out, we can trust the ones that are present should be working
+    - thus, by simply enumerating the nodes in a location, we can see which instances we can connect to
+    - DNS can also be used for this, but its caching on multiple layers means data might be out of date regularly
+- leader election:
+    - **ephemeral nodes** can also be used for leader election: group all the candidates under the same node and the *first* one (lexicograpically, etc) is determined the leader
+    - when the data under a node changes (e.g. by a node disconnecting), we can raise an event and notify all listeners
+
 
  # Stream processing
  ---

@@ -10,6 +10,7 @@ Contents
  * [Storage and retrieval](#storage-and-retrieval)
  * [Replication](#replication)
  * [Partitioning](#partitioning)
+    * [Randezvous hashing](#randezvous-hashing)
  * [Transactions](#transactions)
  * [Problems with distributed systems](#problems-with-distributed-systems)
  * [Distributed consensus](#distributed-consensus)
@@ -247,6 +248,12 @@ Paritioning is usually combined with [Replication](#replication). The data belon
 ## Partitioning key-value data
 
 When deciding how to split the data, we ideally want to make it as even as possible (assuming the nodes all have the same capacity). Otherwise, the workload will be skewed.
+An interesting approach is to:
+- create much more partitions that nodes initially
+- each node gets assigned **a set** of parititions
+- values don't get moved from one partition to another, but instead we move entire partitions
+    - we reassign a node's partitions to other ones when it fails
+    - we move some partitions to new nodes when they are created, in order to keep the load balanced
 
 ### Partitioning by key
 
@@ -262,6 +269,24 @@ Each partition takes an interval of hashes, resuling in something similar to con
 One downside is the fact that adjacent values are now spread across partitions, as we have no guarantee for the hashed values being adjacent as well. In effect, range queries now need to be sent to all the partitions. This is opposed to partitioning by key, where we would know exactly in which partition(s) the results might reside.
 
 A solution is to store data that we want to easily query in the same partiton. For example, we store all the updates from a user within the same partition, e.g. (user_id, post_timestamp). This way, we need to scan a single partition when looking for posts from a certain range.
+
+## Randezvous hashing
+
+In traditional hashing (modulo N), the biggest problem is that we need to rebalance ALL the values when adding or removing nodes.
+For example, value 120 will be on the first node when N = 10, but on the 10th node when N = 11.
+
+The simplest approach for a distributed hashing algorightm is randezvous hashing. This allows:
+- multiple nodes to assign values to the same buckets independently of each other
+- we only rebalance the values assigned to a bucket that failed, not all the rest
+- we want to store the data in multiple buckets for redundancy purposes
+
+Algorithm:
+- each node stores the same hash function, which takes a candidate bucket and the current value and returns a *weight*
+- it applies the function to all the buckets it knows about and orders the results
+- the node orders this list and takes the topmost K elements (the number of replicas)
+- when a bucket dies, all its values are then assigned to the bucket with the next value in line (Kth + 1 in our case)
+    - this will vary acrosss the values, so they will get distributed evently across the other oness
+
 
 ## Seconday indexes
 

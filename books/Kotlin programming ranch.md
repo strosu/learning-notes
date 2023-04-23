@@ -8,6 +8,7 @@ Contents
  * [General](#general)
  * [Variables](#variables)
  * [Branching and comparison](#branching)
+ * [Functions](#functions)
 
 # General
 
@@ -87,4 +88,36 @@ val faction = when(otherVariable)
         5 -> print("five")
         in 6..10 -> println("Level $whenBreaker character")
     }
+```
+
+# Functions
+
+### Single expression methods
+
+Use = instead of =>. In most cases, the return type is inferred automatically, but sometimes the compiler needs a hand.
+
+```
+private fun doSmth(agument: String) : String = argument + "suffix"
+```
+
+## Return types
+
+Specified at the end of the function signature, e.g. private fun doSmthh() : ***String***
+**The equivalent of ***void*** is ***Unit***, which can be omitted**
+For Unit methods, the return keyword can be skipped entirely. Using it results in an early exit of the method, just like C#.
+
+Compared to void, Unit is compatible with generics. TODO - expand here once it's covered better
+
+## Arguments
+- Can have defaults, specified via =
+```
+private fun forgeItem(itemName: String, material: String, quantity: Int = 1)
+```
+- no need to place optional arguments at the end of the list, however we need named arguments when calling and skipping the optional ones
+```
+private fun doStuff(first: String = "first", second: String)
+```
+- can be specified explicitly when invoked:
+```
+forgeItem(itemName = "stuff", "iron")
 ```

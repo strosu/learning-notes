@@ -11,6 +11,7 @@ Contents
  * [Branching and comparison](#branching)
  * [Functions](#functions)
  * [Classes](#classes)
+ * [Visibility modifiers](#visibility-modifiers)
 
 # General
 
@@ -170,12 +171,83 @@ class Book {
 fun main(args: Array<String>)
 ```
 
-- the constructor signature and the property definition are merged, e.g. 
-``` 
-class customer(name: String, age: Int)
-```
+- DTOs can be simplified by using the **data** keyword in front of the class declaration
+    - this provides boilerplate implementations of toString(), equals(), getHashCode() etc
+    - we just need to define the properties in the primary constructor
+    - instead of a reference comparison, equals then becomes a value (per property) comparison
+    - object.copy() will copy all the properties verbatim, but also supports passing in some of the arguments and their values
 
 ## Properties
 
 - defining a property creates the backing field and getter/setter for it
-- can be defined as a var or a as a val
+- can be defined as a var or a as a val. Val being the equivalent of a readonly property
+
+### Getters and setters
+
+- we can use custom getters and setters to access the underlying field. This is done via the **field** keyword.
+
+```
+class Customer(val id: Int, var name: String) {
+    var age: Int 
+        get() { Calendar.getInstance().get(Calendar.YEAR) }
+
+    var bsn: String
+        set(value) {
+            if (!value.startsWith("SN")) {
+                throw IllegalArgumentException("Bad BSN")
+            }
+
+            field = value
+        }
+
+}
+```
+
+## Constructing
+
+Primary and seconday constructors:
+- the primary is the one that also defines the list of properties via var/val
+- the seconday ones are defined using the **constructor** keyword and take in whatever arguments we want
+
+- the constructor signature and the property definition are merged when the property names are preffixed with var or val, e.g. 
+``` 
+class customer(var name: String, var age: Int)
+```
+
+- if the properties are not preffixed with var/val, they are simply values passed into the constructor itself
+
+- constructor chaining is done via this(args), e.g.
+
+```
+class customer(var name) {
+    constructor(var email): this("defaultName") {
+        emailService.validate(email)
+    }
+}
+```
+
+- **init** is run right after the main constructor so we can store custom logic there
+    - it basically acts as the main constructor body, since the main constructor itself is inklined
+
+- multiple init blocks can be present and they are executed in the same order in which they appear
+    - property initializers are executed as interleaved if defined as such
+
+- primary constructor arguments can be used for init blocks and other property initialization, as they are set first 
+
+- secondary constructors are preffixed with "constructor"
+
+
+# Visibility Modifiers
+
+- public = accessed from anywhere, is default
+
+Top level modifiers, i.e. free floating functions:
+
+ - private = inside the file
+ - internal = inside the module
+
+ Class modofiers:
+
+- private = only class members have access
+- protected = only class members and derived classes
+- internal = anything inside the module

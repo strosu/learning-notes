@@ -7,8 +7,10 @@ Contents
 
  * [General](#general)
  * [Variables](#variables)
+ * [Loops](#loops)
  * [Branching and comparison](#branching)
  * [Functions](#functions)
+ * [Classes](#classes)
 
 # General
 
@@ -19,17 +21,40 @@ Contents
 
 Two keywords for defining variables: 
 - var, for mutable values
-- val, for values that do not change (readonly equivalent?)
+- val, for immutable values
     - val const for true compile-time constants, similar to C#
 
-The type is usually infered by the compiler, so var x = 3 should be fine
+The type is usually infered by the compiler, so var x = 3 should be fine. 
+When the compiler cannot infer, just append a suffix (literal constant), e.g. 10L is a Long type, 100F is Float with a value of 100
+
+There is no implicit conversion, even when it would be safe to do so, e.g. an int to a long. Instead, helper functions are used, e.g. .toLong()
 
 Primitives are capitalized, so Int, String, Boolean etc
 
 **All variables are reference types**; the compiler figures out the performance details and uses primites whenever possible
 
 
+# Loops
 
+
+## Ranges
+
+Ranges offer a nice solution for stuff like x >= 2 && x <=5, which can be rewritten as ``` x in 2..5 ``` (both ends of the range are considered as included)
+
+Use a..b for ranges, e.g. 1..100
+- for (a in 1..100) is the equivalent of a foreach
+- for (b in 1..100 step 5) is the equivalent form of a for - start, end and increment
+
+While loops are very standard:
+
+var i = 100
+while (i > 0) {
+    i--
+}
+
+Break can be used to exit the nearest enclosing loop early. Alternatively, we can break to a specific parent, but need labels in this case.
+
+Continue is used to move to the next iteration in the nearest enclosing loop. 
 
 # Branching
 
@@ -57,10 +82,6 @@ Conditional expressions (C# equivalent of var x = a > 2 ? 5 : 10)
         }
     }
 ```
-
-## Ranges
-
-Ranges offer a nice solution for stuff like x >= 2 && x <=5, which can be rewritten as ``` x in 2..5 ``` (both ends of the range are considered as included)
 
 ## When
 
@@ -96,6 +117,8 @@ val faction = when(otherVariable)
 
 ### Single expression methods
 
+Defined using the ***fun*** keyword.
+
 Use = instead of =>. In most cases, the return type is inferred automatically, but sometimes the compiler needs a hand.
 
 ```
@@ -110,6 +133,8 @@ For Unit methods, the return keyword can be skipped entirely. Using it results i
 
 Compared to void, Unit is compatible with generics. TODO - expand here once it's covered better
 
+**Nothing** represents that nothing was retured. An example was of a method that simply threw an exception. Might be useful to check if a function execution returned Nothing?
+
 ## Arguments
 - Can have defaults, specified via =
 ```
@@ -123,3 +148,34 @@ private fun doStuff(first: String = "first", second: String)
 ```
 forgeItem(itemName = "stuff", "iron")
 ```
+
+# Classes
+
+- defined using the ***class*** keyword
+- can contain properties, but the fields are not exposed directly
+
+For instantiation, just call the constructor. Same as C#, without the **new** keyword.
+
+No concept of static; instead of accessing methods without an actual object, a **companion** is defined. Seems to be a default instance of the class.
+- supports having both functions and properties defined within, which result in the usual syntax for accessing them. 
+
+```
+class Book {
+    companion object {
+        var bookCount = 10;
+        fun CreateBook() : Book = Book()
+    }
+}
+
+fun main(args: Array<String>)
+```
+
+- the constructor signature and the property definition are merged, e.g. 
+``` 
+class customer(name: String, age: Int)
+```
+
+## Properties
+
+- defining a property creates the backing field and getter/setter for it
+- can be defined as a var or a as a val

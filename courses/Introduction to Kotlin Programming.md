@@ -12,6 +12,8 @@ Contents
  * [Functions](#functions)
  * [Classes](#classes)
  * [Visibility modifiers](#visibility-modifiers)
+ * [Enums](#enums)
+ * [Inheritance](#inheritance)
 
 # General
 
@@ -236,6 +238,13 @@ class customer(var name) {
 
 - secondary constructors are preffixed with "constructor"
 
+- we can instantiate an object without it being an instance of any class; this object can have properties and it can have a global scope:
+
+```
+object someObject {
+    val stringField: String
+}
+```
 
 # Visibility Modifiers
 
@@ -251,3 +260,54 @@ Top level modifiers, i.e. free floating functions:
 - private = only class members have access
 - protected = only class members and derived classes
 - internal = anything inside the module
+
+# Enums
+
+```
+enum class Priority {
+    LOW,
+    NORMAL,
+    CRITICAL
+}
+```
+
+- can be accessed by name, e.g. 
+```
+val priority = Priority.valueOf("NORMAL") // this should be of type Priority
+```
+
+- can pass additional fields to each value:
+```
+enum class Priority(val value: Int) {
+    LOW(-1),
+    NORMAL(10),
+    CRITICAL(100),
+}
+```
+
+ - this can later be accessed on an instance of the enum via .{propertyName}
+
+- functions can be overriden at an enum type level. Addutionally, we can declare abstract methods inside the enum, with each value defining its own implementation. This seems to be a nice alternative to factory methods scattered in other places. 
+- **NOTE** a ";" is required to separate the enum values from the abstract method list
+
+```
+enum class Priority {
+    LOW {
+        override fun toString() {
+            return "Some other string instead of LOW"
+        }
+        override fun text() {
+            return "low"
+        }
+    },
+    NORMAL {
+        override fun text() {
+            return "normal"
+        }
+    };
+
+    abstract fun text(): String
+}
+```
+
+# Inheritance

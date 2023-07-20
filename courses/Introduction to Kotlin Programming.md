@@ -311,3 +311,8 @@ enum class Priority {
 ```
 
 # Inheritance
+
+The base class for all other objects is the **Any** type. 
+
+**By default, all types are final** - to allow another class to inherit, the base class must explicitly allow it. This is done via the ***open*** keyword, e.g. 
+```open class Person```

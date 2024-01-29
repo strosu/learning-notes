@@ -71,7 +71,18 @@ Redis:
 
 # Postgres
 
-- easy to store data and figure out what to do with it later
+## Properties
+
+- has a well defined set of strictly enforced columns, that all rows must adhere to
+- easy to store data and figure out what to do with it later; the entire query model can change
+- data safety via ACID complience:
+    - Atomicity - an entire operation will either succeed or fail, with no partial results; e.g. if our transaction modifies two rows in two tables, they will either be both altered, or none
+    - Consistency- an operation can only move the database from one valid state to another valid state;
+        - All the writte data must comply with all the database's constraints
+    - Isolation - although operations are happening concurrently, isolation makes it appear as they happened serially. 
+        - It prevents things like dirty-reads (when an operation observes another that is halfway through)
+        - TODO: add more information on concurrency control 
+    - Durability
 
 # Hbase
 

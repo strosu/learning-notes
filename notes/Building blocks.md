@@ -38,10 +38,28 @@ Properties:
 
 **Skip list**
 
+![Skip-list](https://raw.githubusercontent.com/strosu/learning-notes/master/notes/images_blocks/skip_list.JPG)
+
 - a linked list that stores the elements in order
     - adding and removing is an O(1) operation
     - indexing is an O(n) operation
-- to improve the list traversal
+- to improve the list traversal, we keep a list containing roughly every other elementand its links
+    - at ech step, compare to the next
+        - if smaller than the value we're looking for, move pointer to the right
+        - otherwise, move pointer "down" (to a lower level)
+- keeping multiple layers of lists, until we reach to one that has a single element
+    - in total, approx 2N nodes (N + N/2 + N/4 + .. + 1)
+    - log(n) layers of lists
+- acts just like binary search when looking for an element, as we can always "halve" the next interval by moving right
+
+Properties:
+    - O(log(n)) for finding an element
+    - O(log(n)) for insertion, deletion of a random element (need to find it, and update up to log(N) other lists upwards, e.g. if we update the middle)
+    - the elements are stored in order by design, so getting range of M elements starting from a particular one is O(log(N) + M)
+        - we find the element in O(log(N)) and then iterate for another M elements on the lowest level of the list
+
+
+
 
 ### ElasticSearch
 

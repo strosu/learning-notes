@@ -8,8 +8,8 @@ A more in depth reading and notes from DDIA
 - the system should continue to work correctly when dealing with advertity (to the most of its ability)
     - ties strongly into consistency, i.e. failures along durign a request's execution should not leave the system in an inconsistent state
 - **fault tolerance** refers to one of the components of the system not behaving as expected. 
-    - we cannot reduce the change of failures to zero (human/hardware/software errors), thus it is only a matter of time until a failure occurs. 
-    - thus, any reliable system should take these into account and work on mitigating them as much as possible
+    - we cannot reduce the chance of failures to zero (human/hardware/software errors), thus it is only a matter of time until a failure occurs. 
+    - in effect, any reliable system should expect these failures to happen and work on mitigating them as much as possible
 
 ### Hardware failures
 
@@ -17,9 +17,98 @@ A more in depth reading and notes from DDIA
     - on the contrary, machines becoming unavailable is a routine occurrence that should be planned for
 - the cloud providers themselves are responsible for ensuring reliabiity at this level usually, e.g. by spinning up a new VM when one dies
 
+- the network connection between any two nodes can fail at any point
+    - futhermore, we cannot know for a fact the nature of the failure. A timeout for example can mean 
+        - our message never reached the destination, so its recepient is not aware of it
+        - it reached its recipient, which performed some actions in reaction to it (e.g. a write operation), but we failed to receive their response
+
+### Software errors
+
+- as opposed to hardware failures, which tend to be localized (e.g. hard drive failure over distance is not related), software bugs have the potential to take out the entire service
+- usually surface when the underlying assumptions stop being true, e.g. that a service we depend on will continue to return successfully
+- measuring the system behavior in production is essential; it can also help validate our assumptions, e.g. an end-to-end operation results in what we expect it to
+    - this way, the system can constantly check itself and report any inconsistencies
+
+### Human errors
+
+- the most prevalent source of issues; poor configuration is more likely to be the cause of an outage
+- several ways to minimize the likelyhood:
+    - design the API / library such that it's easy to do the right thing and hard to do the wrong one
+    - setting up clear monitoring, such as performance metrics and error rates
+    - can give an early warning for failures, as well as allow for diagnosing the issue
+
+
+
 ## Scalability
 - the system should be able to accomodate growth: both in the total amount of data it stores, as well as the incoming rate. 
 - we should also be able to accomodate more complex data coming in as the requirements evolve over time
 
 ## Maintainability
 - the various (and changing) set of people working on the system should be able to do so *productively*, e.g. 
+
+
+# Chapter 2 - Data models and Query languages
+
+Data models reflect the way we think about the problem we are solving. Once we chose the right models and abstractions for our problem, the solution is usually obvious.
+
+There are several layers of models, stacked on top of each other:
+
+1. The internal models of our application: objects, data structures and APIs. These are specific to the application being developed.
+    - an example: a payment request and transaction. These are domain specific.
+2. When persisting these, we need to map them to a representation the storage layer would understand, e.g. tables, json documents etc.
+    - an example: mapping a payment order to a row in a dynamo table
+3. The storage engine represents its objects in memory / on the disk. Based on the chosen implementation, the entire layer is efficient for some operations, while not idea for others
+    - an example: doing a many-to-many join is less than ideal for dynamo, since we need to make several requests to get the entire model
+
+Each layer hides the complexity below it and exposes a simple abstraction to be used by the callers. Examples: a paygate API that is a facade for the underlying operations.
+
+## Options for reprensenting our models
+
+1. In a traditional SQL fashion, we can represent our models in separate tables, with FKs referencing other entries. 
+    - Example: payment orders table and payments table, with the payment row having a FK to the payment order Id
+    - relatively straighforward if the relations are 1-1 or 1-many, e.g. a **tree structure**.
+
+2. Storing the entire document as a JSON in a column. Tipically we can't search / index within this document, but we let the application interpret its content.
+    - storing the object as a JSON makes the relationship between the nodes explicit, e.g. payments live under a payment order
+
+Storing IDs vs storing values:
+
+- IDs never need to change (as opposed to names etc), as they are not meaningful to humans. Thus they are more flexible.
+- referencing an ID removes duplication. Storing the text directly would require duplicating it in every record that uses it.
+- storing the ID requires a Join to resolve it to the actual textual value.
+    - for relational DBs, this is straightforward and supported by the engines themselves
+    - for non-relational, it usually involves making multiple queries to the DB
+
+Example: storing user information inside the payment order vs storing the user ID
+- if we store an ID for the product, this can be resolved when querying (by also making a query to retrive the user and their details based on its ID)
+    - this allows the information to be dynamic, e.g. a user can change their name
+- if we store the information directly, it removes the need for another query
+    - however, we'd need to update all the duplicated information should something change for that user
+
+## The relational model
+
+- all the data is laid out in the open - a table is a collection of rows with no other special meaning
+- one can query a subset or all the records in a table
+- the query optimizer decides how to execute the query, **and which indexes to use**. Adding a new index does not involve code changes, it will instead be chosen automatically if it would help with a particular query's execution.
+
+### Relational charateristics:
+
+- better support for joins 
+- better 1-n / n-n relationship modelling
+- you can refer to any object directly
+- validates the schema on write; if no match, the DB will prevent the write (statictly typed checking)
+- schemas are a useful mechanism when we expect all records to follow the same structure. It can be used to document and enforce this.
+
+### Document characteristics:
+
+- easier to map to actual objects being used by the application, as we can deserialize the entire tree into an in-memory model right away
+- if using nested objects, we cannot reference them directly. E.g. if all payments for an order live under the same entry for the Payment Order, we wouldn't be able to retrieve one of them without knowing their parent
+- "validates" the schema on read, but deserializing it into an object with an implicit structure (dynamic type checking)
+- modifying the schema is as simple as writing in the new format
+    - the burden of keeping both versions in check falls to the application code
+- data locality:
+    - the entire document it stored in a contiguous block on the disk
+    - if we often need to access large parts of it at the same time, reading will be faster due to *storage locality*
+    - as opposed to this, multiple index lookups will probably need to read multiple disk locations, thus be slower (even if it's all part of the same query)
+    - if we only use a small part of the document, the DB will still load the entire value. which is wasteful
+    - keeping the documents small is ideal, as well as avoiding rewrites (the entire value has to be overwritten)

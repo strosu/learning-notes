@@ -112,3 +112,96 @@ Example: storing user information inside the payment order vs storing the user I
     - as opposed to this, multiple index lookups will probably need to read multiple disk locations, thus be slower (even if it's all part of the same query)
     - if we only use a small part of the document, the DB will still load the entire value. which is wasteful
     - keeping the documents small is ideal, as well as avoiding rewrites (the entire value has to be overwritten)
+
+
+## Query languages
+
+Two main approaches: an imperative vs a declarative description.
+
+### Imperative
+
+- defines a list of operations instructions to be executed, in a particular order
+- the query engine doesn't know if the caller relies on the order of the results being returned, so it cannot alter it for optimizations
+- is a poor candidate for parallelization, as we need to guarantee the order in which the operations are executed
+- we can ofc shard the data and aggregate the results if possible, but it leads to more code
+- Javascript as an example
+
+Example:
+
+```
+for (i in 1..n) {
+    list.add(n)
+}
+```
+
+### Declarative
+
+- defines conditions the patterns has to meet
+- delegates all other implementation details to the query engine
+- offers fewer guarantees, thus is more generic (and flexible)
+- css as an example
+
+Example:
+
+```
+list.filter { it.name == "Europe" } 
+```
+
+CSS example
+- defines the pattern which an element has to meet in order to apply the style
+- all <p> elements where a selected <li> element is its parent
+
+```
+li.selected > p {
+    background-color: blue;
+}
+```
+
+## MapReduce querying
+
+0. A filter is specified declaratively
+    - this allows the query engine to select which items are relevant for the operation
+1. The map function is imperative and it is applied once per each element
+    - it returns a key and a value
+2. The pairs are grouped by key. For all key-value pairs with the same key, the reduce function is called once with the entire set
+    - the reduce function returns a single value for the entire group
+
+The map and reduce functions must be pure:
+- no reading the database
+- must only use the data that is passed into them
+- no side effects (as we they might be run multiple times in cases of failures)
+- they can use libraries, do computations etc
+
+For a list of documents having three properties: family (for querying), timestamp (for grouping) and numAnimals (for reducing):
+
+
+```
+db.observations.mapReduce(
+    function map() {
+        var year = this.timestamp.getFullYear()
+        emit(year, this.numAnimals)
+    }
+    function reduce(key, values) {
+        return Array.sum(values);
+    }
+    {
+        query: { family: "Sharks" },
+        out: "sharkReport"
+    }
+)
+```
+
+## Graph like databases
+
+When the relations between objects are mostly N to N, and the types of relations are varied.
+Modeling the data as a graph allows us to leverage algorithms designed for graph traversal.
+
+![GraphDB](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/sstagraph_dbble.png)
+
+Components:
+- a set of vertices, containing all the types of objects in our model
+    - each model is its own document, with a list of properties
+- the relations between them
+    - this can be modelled as a (pair of ) directed, or undirected edge. E.g: 
+        - two people are both married to each other
+        - an actor can have a "playedIn" edge to a movie, while the movie has a "hasActor" edge to the same actor

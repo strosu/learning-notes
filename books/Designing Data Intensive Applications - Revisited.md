@@ -2,6 +2,21 @@
 
 A more in depth reading and notes from DDIA
 
+Contents
+========
+
+ * [Chapter 1](#chapter-1)
+    * [Reliability](#Reliability)
+    * [Scalability](#Scalability)
+    * [Maintainability](#Maintainability)
+ * [Chapter 2](#chapter-2)
+    * [Data models and Query languages](#Data-models-and-Query-languages)
+    * [The relational model](#The-relational-model)
+    * [Document model](#Document-characteristics)
+    * [MapReduce](#mapreduce-querying)
+    * [Graph databases](#graph-databases)
+
+
 # Chapter 1
 
 ## Reliability
@@ -38,7 +53,6 @@ A more in depth reading and notes from DDIA
     - can give an early warning for failures, as well as allow for diagnosing the issue
 
 
-
 ## Scalability
 - the system should be able to accomodate growth: both in the total amount of data it stores, as well as the incoming rate. 
 - we should also be able to accomodate more complex data coming in as the requirements evolve over time
@@ -47,7 +61,9 @@ A more in depth reading and notes from DDIA
 - the various (and changing) set of people working on the system should be able to do so *productively*, e.g. 
 
 
-# Chapter 2 - Data models and Query languages
+# Chapter 2 
+
+## Data models and Query languages
 
 Data models reflect the way we think about the problem we are solving. Once we chose the right models and abstractions for our problem, the solution is usually obvious.
 
@@ -101,6 +117,7 @@ Example: storing user information inside the payment order vs storing the user I
 
 ### Document characteristics:
 
+- ideal where data comes in self-contained documents and relations between documents are rare
 - easier to map to actual objects being used by the application, as we can deserialize the entire tree into an in-memory model right away
 - if using nested objects, we cannot reference them directly. E.g. if all payments for an order live under the same entry for the Payment Order, we wouldn't be able to retrieve one of them without knowing their parent
 - "validates" the schema on read, but deserializing it into an object with an implicit structure (dynamic type checking)
@@ -191,10 +208,11 @@ db.observations.mapReduce(
 )
 ```
 
-## Graph like databases
+## Graph databases
 
 When the relations between objects are mostly N to N, and the types of relations are varied.
 Modeling the data as a graph allows us to leverage algorithms designed for graph traversal.
+**Ideal for scenarios where anything can be related to anything, i.e. plenty of N-to-N relations**
 
 ![GraphDB](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/sstagraph_dbble.png)
 
@@ -205,3 +223,32 @@ Components:
     - this can be modelled as a (pair of ) directed, or undirected edge. E.g: 
         - two people are both married to each other
         - an actor can have a "playedIn" edge to a movie, while the movie has a "hasActor" edge to the same actor
+- each edge has the following:
+    - a unique ID
+    - a start vertex ID
+    - an end vertex ID
+    - a label to describe the type of relation, e.g. played-in 
+    - ***a collection of properties***
+
+It's simple to get the list of all edges either incoming or outgoing from a vertex.
+- this allows us to traverse the graph starting at any vertex, in both directions
+- using different labels keeps the model clean, while allowing for multiple types of relations to be described
+
+Example for creating the graph: (is it worth it?)
+
+Example for querying:
+
+```
+MATCH
+    (person) -[BORN_IN] -> () -[WITHIN*0..] -> (us:Location { name:'United States' })
+    (person) -[LIVES_IN] -> () -[WITHIN*0..] -> (eu:Location { name:'Europe' })
+```
+
+- this query finds any vertex that matches two conditions:
+    - it has a BORN_IN edge to another vertex; from this vertex, there exists a path of 0 or more WITHIN edges to a vertex of type Location, that has a name of 'United States'
+    - it has a LIVES_IN edge to another vertex; from here there exists a path of 0 or more WITHIN edges to a vertex of type Location, that has a property called 'name' with a value of 'Europe'
+
+Multiple ways this query might get executed:
+- one can start with all the people and traverse the graph until it matches (or not) the criteria
+- we can also start with all the ending vertices and move towards other locations, and eventually people.
+- given the language is declarative, we don't care about these optimizations; the query engine takes care of chosing the best approach

@@ -74,10 +74,15 @@ Redis:
 ## Properties
 
 - has a well defined set of strictly enforced columns, that all rows must adhere to
+- the enforcement is done at insertion time, like a staticly typed language
+
+- A table (relation) is a set of rows (tuples), containing columns(attributes) mapped to atomic values. 
+- The available attributes are defined at a table level. The header maps each attribute to a constraining type 
+
 - easy to store data and figure out what to do with it later; the entire query model can change
-- data safety via ACID complience:
+- data safety via ACID compliance:
     - Atomicity - an entire operation will either succeed or fail, with no partial results; e.g. if our transaction modifies two rows in two tables, they will either be both altered, or none
-    - Consistency- an operation can only move the database from one valid state to another valid state;
+    - Consistency - an operation can only move the database from one valid state to another valid state;
         - All the writte data must comply with all the database's constraints
     - Isolation - although operations are happening concurrently, isolation makes it appear as they happened serially. 
         - It prevents things like dirty-reads (when an operation observes another that is halfway through)

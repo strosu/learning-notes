@@ -214,7 +214,7 @@ When the relations between objects are mostly N to N, and the types of relations
 Modeling the data as a graph allows us to leverage algorithms designed for graph traversal.
 **Ideal for scenarios where anything can be related to anything, i.e. plenty of N-to-N relations**
 
-![GraphDB](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/sstagraph_dbble.png)
+![GraphDB](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/graph_db.png)
 
 Components:
 - a set of vertices, containing all the types of objects in our model

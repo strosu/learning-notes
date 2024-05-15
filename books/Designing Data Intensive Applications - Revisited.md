@@ -211,7 +211,9 @@ db.observations.mapReduce(
 ## Graph databases
 
 When the relations between objects are mostly N to N, and the types of relations are varied.
+
 Modeling the data as a graph allows us to leverage algorithms designed for graph traversal.
+
 **Ideal for scenarios where anything can be related to anything, i.e. plenty of N-to-N relations**
 
 ![GraphDB](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/graph_db.png)
@@ -252,3 +254,66 @@ Multiple ways this query might get executed:
 - one can start with all the people and traverse the graph until it matches (or not) the criteria
 - we can also start with all the ending vertices and move towards other locations, and eventually people.
 - given the language is declarative, we don't care about these optimizations; the query engine takes care of chosing the best approach
+
+# Chapter 3 - Storage and retrieval
+
+The previous chapter covered the way that we shape the data and store / query it in the database. Now we'll look at how this is reprensented internally in the storage engine. 
+
+## Data structures used by the databases
+
+- Two main categories of storage engines:  
+    - log-oriented
+    - page-oriented
+
+Designing a simple key-value store:
+- we use an append-only log, storing both the key and the value
+- very efficient for writes, as we just append at the end of the file
+- very inefficient for reads, as we need to parse the entire file to get a value (O(n))
+
+An **index** is an additional structure derived from the main body of information. 
+- adding or removing one has no impact on the data itself
+- by their nature, they will always slow down writes (as the index needs to also be kept updated)
+- well designed indexes will speed up reads. However, which indexes to chose is up the the application developer
+- given their drawback, most engines don't add indexes by default
+
+### Hash indexes
+
+- using our previous example of an append-only log file, we want to use an index to improve the read speed
+- we can store an in-memory structure that ***maps each key to its latest offset in the file***
+    - on writes, we can do an O(1) lookup into the index and update it
+    - on reads, we do an O(1) lookup to find the offset, and another O(1) to read the value
+    - the main drawback is the fact that the entire key space has to fit in memory
+    - **range queries are not efficient, as the keys ar not adjacent**
+- this is very efficient for scenarios where the values are updated quickly, but the key space is contained
+    - an example is video counters, where the number of actions (views) is much larger than the number of keys (videos)
+    - Riak offers a similar implementation
+
+Problems arise when the log file gets too large, as it cannot grow infinitely.
+Due to the old values not being relevant anymore (as we only care about the current one), we need a way to reclaim the space.
+
+1. When the log file grows to a certain size, we stop accepting new writes to it and open a new one (and a corresponding hash index)
+2. When a read request comes in, we first check the current file's hash index. If the key is present, return; otherwise, we look backwards through the older log files
+3. To reclaim data, we have a background job that:
+    - reads the old log files and only keeps the latest value for each key (sweep)
+    - merges the smaller segments from the above step across multiple files (compact)
+    - while the task runs, keep serving reads from the old files
+    - once it's done, point the reads to the newly compacted files and delete the verbose ones
+
+Other considerents
+
+- deleting records:
+    - we need a special marker that expresses the value is deleted (called tombstone)
+    - when this is present explicitly, just discard the value
+    - when doing the sweep, we can just not copy it
+
+- crash recovery:
+    - the hash maps will be lost on a reboot;
+    - however, we can save them to disk. For closed files, they will never change, while for in-use files we can keep flushing them regularly as backup points
+
+- partially written records:
+    - we can use a checksum for detection
+    - how? do we just discard the latest entry in the file?
+
+### SSTables and LSM-Trees
+
+### B-Trees

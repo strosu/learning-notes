@@ -316,4 +316,42 @@ Other considerents
 
 ### SSTables and LSM-Trees
 
+To overcome the need to keep all the keys in memory, as well as the inefficiency for range queries, we can change how the index is built.
+
+We'll be using an additional in-memory structure that allows us to keep the keys in order (e.g. a red-black tree). This is the *memtable*
+
+For writing:
+
+1. A request comes in and is appended to the WAL, for recovery purposes
+2. We keep an ordered in-memory structure with the current set of key-values (memtable)
+    - appending and reading from it should be simple and fast
+3. When the in-memory structure gets too large, we flush it to disk as an SSTable (Sorted String Table)
+    - this is efficient, as the tree already has the keys sorted
+    - while we write it to the disk, additional writes go to a new memtable
+4. For each SSTable, we continue to require an in-memory structure mapping the keys to the offsets
+    - however, since the keys are now sorted in the SSTable, we can keep a *sparse* structure - we only store a subset of the key / offset pairs
+
+For compacting:
+
+1. We take a list of existing SSTables flushed from the memtable (or previous compactions)
+2. Since all of them are in order, we can use merge-sort to merge them into a single SSTable
+    - we discard equal values from earlier segments, as those got overwritten
+    - for the new SSTable, we build the new sparse in-memory index
+    - the ranges between the values in the index can be compressed before writing it to the disk
+    - this is fine, as we'll read the entire range anyway
+
+For reading:
+
+0. We use a Bloom filter to determine if the DB might contain the key; if not, return
+1. We check the memtable. If it contains the key, we just return the value
+2. If the memtable does not contain the key, we need to find it:
+    - we process the SSTables from the newest to the oldest to try and find it
+    - for each one, read the in-memory index and determine a candidate range / compressed block
+    - if any viable range, read the block and check for the value
+    - repeat until found, or we run out of segments
+
+The LSM-Tree is the entire grouping of SSTables, indexes and the memtable.
+
 ### B-Trees
+
+

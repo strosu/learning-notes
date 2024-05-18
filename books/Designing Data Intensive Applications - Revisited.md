@@ -423,8 +423,7 @@ A **clustered index** is an index that has the information in-place. This can be
         - we build a secondary index for the last name
             - this can result in a new B-Tree, partitioning the keys alphabetically
             - the leafs (actual values) can just store a list of userIds corresponding to that last name
-            - thus we can obtain a list of values for the secondary index in log[depth](N)
-
+            - thus we can obtain a list of values for the secondary index in log (depth) (N)
     - another approach is to partially store some information in the seconday index, so we wouldn't have to perform another lookup against a set of primary keys
         - for example we can also store the first name values in the example above
         - this has the downside of having mutliple copies of the information, so ensuring transactional guarantees and preventing inconsistencies becomes more difficult

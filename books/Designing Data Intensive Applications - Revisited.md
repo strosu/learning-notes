@@ -354,4 +354,85 @@ The LSM-Tree is the entire grouping of SSTables, indexes and the memtable.
 
 ### B-Trees
 
+Another approach is to breakdown the database into **fixed** size blocks (usually 4KB) and read / write one page at a time.
 
+![B-Tree insertion](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/btree.png)
+
+Each page is identified using a location on the disk, which allows us to build a tree of pointers, each referencing a page. 
+- each child is responsible for a continuous range of keys, which are stored in order
+- the keys between the references define the boundaries of the intervals
+- the **branching factor** (how many intervals a node contains) determines the depth of the tree. A factor of 500 with 4KB pages can store more than enough information.
+
+When reading:
+- start from the root
+- use binary search to find the child that might contain our value or interval
+    - repeat until we reach a leaf node (which contains actual values) and check the value is there
+
+When writing:
+- for updates:
+    - find the leaf node and change the value; all references to that page remain valid
+- for inserts:
+    - find the leaf node and add the new value
+    - if it doesn't fit, split the page into two halves, and update the parent with two intervals instead of one
+        - should the parent be full, bubble up the change (this is in effect an insertion into the parent, as one interval turns into two)
+- page update:
+    - we can write the new value of the page to a new location and update the reference in the parent, instead of overwriting in place
+    - a page might contain pointers to its siblings, to allow for sequential scanning
+
+### LSM vs B-trees
+
+LSM wins:
+
+- we write just the information that is needed, as opposed to an entire page
+    - NOTE: appending to the WAL does not really result in a write to the disk immediately. 
+- we write compact SSTables sequentially, as opposed to random pages at random addresses
+    - might benefit from data locality, i.e. if the SSTables are next to each other, the might already be loaded in the CPU cache optimistically
+- LSM trees don't leave space unoccupied, as opposed to B-Trees, which have a fixed-size page
+    - this page is mostly empty when initially created
+
+B-Tree wins:
+
+- no background processes to interfere with the DB operations
+    - for LSM, the incoming DB writes and the compacting are competing for the same resources
+    - more predictable throughput, **especially at high percentiles**
+- the key exists in a single place
+    - this makes it easier to lightly lock for transactional purposes
+
+## Other types of indexes
+
+A B-Tree/LSM tree offers indexing on a single key, similarly to a primary key. Thus, each row/document/vertex is uniquely identified by the key.
+
+Secondary indexes are similar, except they might have more than one value corresponding to the same key.
+    - we can solve this by either having a list of IDs associated with the value of the secondary index
+    - or by making each entry unique, via adding a unique identifier to it
+
+### Storing values within the index
+
+The value we store can be:
+- the actual value
+- a pointer to the actual value's location; In this case, the rows are stored in a **heap file**.
+    - this approach helps prevent duplication, as each seconday index can simply reference the relevant row in the heap file
+    - when updating a value:
+        - if it fits in the same location, no further changes
+        - otherwise, we need to update its references too, or to leave a **forwarding pointer** 
+
+A **clustered index** is an index that has the information in-place. This can be the primary index of the table, e.g. our B-Tree. 
+    - other secondary indexes can simply reference the row IDs.
+    - an example:
+        - the B-Tree uses userId as the key, with each value being unique
+        - we build a secondary index for the last name
+            - this can result in a new B-Tree, partitioning the keys alphabetically
+            - the leafs (actual values) can just store a list of userIds corresponding to that last name
+            - thus we can obtain a list of values for the secondary index in log[depth](N)
+
+    - another approach is to partially store some information in the seconday index, so we wouldn't have to perform another lookup against a set of primary keys
+        - for example we can also store the first name values in the example above
+        - this has the downside of having mutliple copies of the information, so ensuring transactional guarantees and preventing inconsistencies becomes more difficult
+
+### Multi-column indexes
+
+- The current structures allow us to query on a single dimension, that of the primary key. It's easy to get all users with an ID between N and M, but not those that also have a birthday in June.
+
+A **concatenated index** is simply a concatenation of the values from multiple columns / attributes. E.g. mapping {lastName + firstName} to a phone number: easy to query by the combination or by the lastName, but not so much by firstName. 
+
+R-Trees used for this. TODO - add more info here - https://www.bartoszsypytkowski.com/r-tree/ 

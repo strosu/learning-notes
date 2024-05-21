@@ -435,3 +435,153 @@ A **clustered index** is an index that has the information in-place. This can be
 A **concatenated index** is simply a concatenation of the values from multiple columns / attributes. E.g. mapping {lastName + firstName} to a phone number: easy to query by the combination or by the lastName, but not so much by firstName. 
 
 R-Trees used for this. TODO - add more info here - https://www.bartoszsypytkowski.com/r-tree/ 
+
+### Fuzzy searches
+
+- a regular B-tree or LSM tree allow for querying only for a precise key
+- a misspelled one might not be close to the actual key looked up (e.g. first char is different)
+- some engines allow for querying for keys within a certain edit distance than the key (number of different chars)
+- there are dedicate algorithms that allow for searching within an edit distance, based on the in-memory (sparse?) index
+    - we can transform it into a preffix tree and not just look for a direct parent-child link, but also take into account the current char might be misspelled
+    - Levensthein distance?
+
+
+### Keeping all the data in memory (a-la Redis)
+
+- due to the erasure on power loss, it is considered to be volatile
+- most are suited for keeping not-critical data, but we can also keep a WAL to persist the information and rebuild the in-memory representation if needed
+- another disadvantage is that we can't easily inspect the contents of the DB; a DB that writes its data to disk allow for backups and inspections
+- an advantage is enabling new data structures that would be difficult to implement with persistent storage, e.g. a priority queue
+
+
+## OLAP vs OLTP
+
+- two main use cases for a data storage:
+    - queries for real-time usage (OnLine **Transaction** Processing):
+        - Reads: small number of records per query, retrieved by their keys
+        - Writes: random-access, should be low-latency
+        - User: a user via an interaction with the service
+        - Data version: uses the latest version of the data
+        - Size: GB to TB of information
+    - queries for analytics (OnLine **Analytics** Processing)
+        - Reads: large number of records per query
+        - Writes: either in batches (ETL), or via event streaming
+        - User: data analyst
+        - Data version: all of it, has a history of events that happened
+        - Size: TB to PB
+
+Why separate:
+- OLTPs are critical to the business operations
+- each team usually manages their own service / data
+- long running queries against the OLTP can affect their performance
+    - resources are shared
+    - transactions are also affected via locking
+
+### Data warehouse
+
+- a system where the a copy of the information from various sources is loaded
+- information is either loaded:
+    - in a continous stream (via event sourcing)
+    - in batches, via ETL - Extract, Transform, Load
+- can be optimized for different access patterns than the OLTP
+
+The usual schema for a data warehouse is a star / snowflake:
+- a fact table is the core of the model and stores most of the information
+    - each row represents an event (e.g. a payment order was created, paid, etc)
+    - each event is captured separately
+        - allows for a historical view 
+        - however, the table will grow at a faster pace
+- the fact table references other tables, or *dimensions*
+
+![Star schema](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/star_schema.png)
+
+- the tables often have a large amount of columns (e.g. hundreds), while queries only care about a handful of them
+
+## Column-oriented storage
+
+- in most OLTP DBs, storage is laid out in a row-fashion (all the information in a row is located in the same place)
+- in a document DB, the entire document is stored in one place (contiguous sequence of bits)
+
+- when querying, the entire row / document need to be loaded into memory, which is inefficient
+
+Alternatively, we can keep the information from the same column together. 
+- each file is a list of values, corresponding to the values of all the records for that column
+- the ordering is consistent across the column files, i.e. the 3rd element in each of them corresponds to the same row
+- this way we can reconstruct a row whenever needed
+
+Advantages:
+
+- When querying for a subset of column, only those need to be loaded from the disk
+- data in one column might have similar values for different rows, thus a good candidate for compression
+
+### Column compression
+
+- Based on the idea that a column will have a (small) finite number of possible values.
+- for each possible value, we compute a bitmap (array of bits) based on the column values:
+    - if the n-th row's value matches the one we're building the bitmap for, the n-th value in the boolean array will be 1
+    - 0 otherwise
+    - when doing a query for product_sk in (23, 35, 42), we can look up 23's, 35's and 42's bitmaps 
+        - we compute a bitwise OR on the bitmaps
+        - the result's positions for 1s will be the row IDs that match the query
+    - when doing a query for product_sk = 3 and store_sk = 7
+        - we apply 3's bitmap on the product_sk column
+        - we apply 7's bitmap on the store_sk column
+        - apply a bitwise AND between the results
+        - the result's positions for 1s will be the row IDs
+
+Additionally, we can also perform run-length encoding on the bitmaps:
+- an array of 0 0 0 0 0 1 0 0 0 0 can become 5,1 (5 zeroes, 1 one, rest zeroes). 
+- this can improve the compression even further
+
+To sum it up, we're relying on pre-computed values (the bitmaps) in order to answer queries faster when needed. 
+- these bitmaps need to be updated when new information is being written
+
+### Vectorized processing
+
+TODO - add more information here
+
+https://www.infoq.com/articles/columnar-databases-and-vectorization/
+
+- when scanning over millions of rows, data needs to go from disk -> memory -> CPU
+- the operations for bitmaps can be executed directly on the compressed data (how?)
+
+### Sort order
+
+- we can insert in the order in which the write calls come in, similarly to a log (by appending to the end of the column files)
+- alternatively, we can keep them in order (similarly to the SSTables) and get fater lookups
+
+- Based on the types of queries we want to answer, we can chose a different column for which to sort
+- scanning over a sorted column is obviously much faster, as we can identify the relevant rows directly
+- since adjacent values will be adjacent in the file, we also take advantage of data locality
+
+- we can define multiple sort columns, to be applied as GroupBy.ThenBy.ThenBy etc.
+    - the locality effect is also applied by induction. E.g. groupBy product_sk, then by store_sk
+        - within the group of relevant rows identified for product_sk, they will be ordered by store_sk so we can filter more easily
+    - having the same values next to each other also helps with compression
+        - this becomes less and less relevant the deeper we go, as the values will not be in any order relative to the table
+
+Different ordering:
+- since we need to keep multiple copies of the data, we can also keep them sorted using different columns
+- this is similar to having mutliple secondary indexes in a relational DB
+
+Writing:
+- all the optimizations above are helping with reading, but are making writes more difficult
+- when the data is compressed, updating it in place is inefficient
+    - inserting a row would mean rewriting **all** the column files, as they would need to be kept in order
+
+- instead, we use a memtable as for LSM trees:
+    - writes come in, we update the in-memory structure
+    - when it's full, it is flushed and merged with the existing compressed files
+- queries need to look at both disk data and the memtable, but the query engine abstracts this
+
+### Data cubes
+
+- similarly to how we precomputed the bitmaps for values in the same column, we can precompute query results
+- a **materialized view** is a persisted table, caching query results for particular dimensions:
+
+![Materialized view](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/materialized_view.png)
+
+This has two downsides:
+- when the value of any column changes, this needs to be updated (since it's a copy of the data); **thus writes are slower**
+    - if the ratio of reads to writes is worth it, this will however overall speedup the querying
+- we cannot get more granular data, e.g. which sales came from which products

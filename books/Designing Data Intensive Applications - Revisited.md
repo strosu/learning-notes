@@ -15,6 +15,12 @@ Contents
     * [Document model](#Document-characteristics)
     * [MapReduce](#mapreduce-querying)
     * [Graph databases](#graph-databases)
+* [Chapter 3](#chapter-3---storage-and-retrieval)
+    * [SSTables and LSM trees](#sstables-and-lsm-trees)
+    * [BTrees](#b-trees)
+    * [Other types of indexes](#other-types-of-indexes)
+    * [OLAP vs OLTP](#olap-vs-oltp)
+    * [Column oriented](#column-oriented-storage)
 
 
 # Chapter 1
@@ -536,6 +542,9 @@ Additionally, we can also perform run-length encoding on the bitmaps:
 To sum it up, we're relying on pre-computed values (the bitmaps) in order to answer queries faster when needed. 
 - these bitmaps need to be updated when new information is being written
 
+![Column compression](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/column_compression.png)
+
+
 ### Vectorized processing
 
 TODO - add more information here
@@ -585,3 +594,84 @@ This has two downsides:
 - when the value of any column changes, this needs to be updated (since it's a copy of the data); **thus writes are slower**
     - if the ratio of reads to writes is worth it, this will however overall speedup the querying
 - we cannot get more granular data, e.g. which sales came from which products
+
+
+# Chapter 4 - Encoding and schema evolution
+
+Two main concerns:
+- how do we store the data on the disk in a more efficient format?
+- how does the application stay forward / backwards compatible, given the data format?
+
+A rolling update will result in:
+- new versions reding old data / getting old requests
+- old versions reading new data / getting new requests
+
+## Formats for encoding
+
+Two types of representations:
+- in-memory: objects and their pointers, optimized for access
+- serialized data - self contained sequence of bytes
+
+### JSON
+
+- verbose compared to binary formats
+- no option of specifying the type, e.g. when encoding numbers (int vs float, precision)
+- easily readable => a good choice for inter-organization communication (i.e. people boundary)
+
+A base example:
+
+```
+{
+    "userName": "Martin",
+    "favoriteNumber": 1337,
+    "interests": [ "daydreaming", "hacking"]
+}
+```
+
+### Binary formats
+
+- the underlying idea is that we'll have multiple records following the same structure
+- encoding the schema in each of them is not needed; if both the reader and the writer agree on the structure, a simple stream of bytes can be sufficient (and much more compact)
+
+- the schemas between the writer and the reader must be compatible. This applies to both:
+    - JSON: a required field by the reader must be set by the writer
+    - binary formats - byte offsets might mess up the entire deserialization.
+
+- many applications have their proprietary data formats / protocols, e.g. a network protocol for databases
+
+### Avro
+
+- separates the schema from the data
+- when ecoding, we're using a *writer's schema*
+- when decoding, we're using a *reader's schema*
+- the library takes care of mapping fields from one to the other, as long as they are compatible
+    - the order of the fields might change
+    - a field might be renamed, but the reder's schema must contain an alias to map it
+    - if a reader expects a field, the deserialization will provide a default value
+    - extra fields from the writer are discarded when reading
+
+![Avro encoding](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/avro.png)
+
+Due to size considerents, we don't want to include the schema for each record, as this would negate the entire benefit.
+This is a good solution for cases when we have one encoding and multiple records:
+
+1. File with lots of records
+    - we include the schema once at the start of the file, and all records are expected to follow it
+    - con: can't vary the schema within the file
+2. Database with individual records:
+    - each record might be written with a different schema
+    - add a tag to each row to specify which schema version was used
+    - have a separate location that maps the schema version to the actual schema
+3. Sending records over the network:
+    - the schema can be negociated on conection setup (e.g. accepts)
+    - we assume the schema will not change during the lifetime of the connection (which should hold, we change the schema on redeployments / restarts)
+
+## Data flow
+
+- the process of sending information to a process with which we don't share any memory (same machine, remote etc)
+
+### Through databases
+
+### Through service calls
+
+### Through message brokers

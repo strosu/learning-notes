@@ -670,8 +670,53 @@ This is a good solution for cases when we have one encoding and multiple records
 
 - the process of sending information to a process with which we don't share any memory (same machine, remote etc)
 
-### Through databases
+### 1. Through databases
 
-### Through service calls
+- the data has to be encoded when writing (as it leaves the memory), and decoded when read
+- when doing an upgrade, we can end up with the following situation:
+    - old code knows about field A
+    - new code knows about fields A and B
+    - new code writes a record with A and B
+    - old code reads it and deserializes into an object (with just field A)
+    - old code writes the serialized record and overwrites the initial version, losing B
 
-### Through message brokers
+- when doing a migration, the old rows are not usually rewritten
+- instead, they get a default (null) value for the newly added columns
+
+- when doing a backup or a dump, it is good to also take the time to bring all the records to the latest schema
+- since the rows will have the same schema, Avro is a good fit for compression
+
+### 2. Through service calls
+
+- writing to a DB allows the readers to perform arbitrary queries, so it's more flexible
+- exposing an API only allows a subset of queries, i.e. those allowed by it
+
+### REST 
+
+- as the services are developed / deployed independently, we must support different versions talking to each other
+- as opposed to a DB write / read, this is a **synchronous** communication
+    - the client expects a response as soon as possible
+- JSON responses usually consider extra fields added to be backwards compatible, i.e. the reader should just ignore those
+- can use API versioning, in which the clients use a different URL for different supported versions
+    - has the downside of forcing the server to maintain the old versions too
+
+### RPC
+
+- attemps to emulate a network call as if it would be local
+- there's a clear disctinction between a client and a server usually, so the server can be updated first (i.e. we only need backwards compatibility)
+
+### 3. Through message brokers
+
+- the communication is asynchronous by design, i.e. we return once the message has been persisted to the broker
+- acts as a buffer when the readers are down or too slow
+- can redeliver messages to a process that has not acknowledged them (via offsets)
+- removes the need for the sender to know the receiver's address
+- allows fanning out, i.e. one message to multiple consumers
+- decouples the sender from the receiver, abstracting the latter away (we know *someone* will consume a message, we don't care who that is)
+
+- the communication is mostly one-way, since we don't expect a response
+    - this can be emulated via another channel: another topic, or a callback etc
+
+- no schema is usually enfored, just key-value pairs
+    - any encoding format would work, including a compressed one
+    - puts the compatibility responsability on the producer and consumers

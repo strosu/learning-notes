@@ -720,3 +720,157 @@ This is a good solution for cases when we have one encoding and multiple records
 - no schema is usually enfored, just key-value pairs
     - any encoding format would work, including a compressed one
     - puts the compatibility responsability on the producer and consumers
+
+# Chapter 5 - Replication
+
+- keeping multiple copies of data on different machines, that share a network
+
+Three main reasons:
+
+- bring data closed to the user (to reduce latency)
+- increase availability, by having redudancy in case of failures
+- scale out the read capacity, through multiple machines that can serve the requests
+
+- the difficult aspect is not in copying the data itself, but copying the changes to it, in a constent manner
+
+Terminology:
+- a replica is an instance that stores a copy of the database (or a subset of it)
+- leader: a replica that accepts write requests
+- follower:
+    - a replica that does not accept write requests. Instead, it forwards these to the leader
+    - whenever the leader performs a write, the changes must replicate to the followers
+    - thus, each follower consumes the replication log of the leader
+
+When does the replication happen:
+
+## Synchronous replication
+
+- the server replicates the operation to the follower(s) before returning to the caller
+- guarantees follow up reads will see the most up to date information when reading from the followers
+- impractical to wait for **all** the followers to acknowledge, as a single node outage would mean system outage
+- a compromise exists, where we have a synchronous follower (which might be a good candidate for a backup leader), while the rest are async
+    - if the sync follower becomes slow or unresponsive, another one is promoted in its place
+
+## Async replication
+
+- the server can return to the caller before the replication operation has finished
+- the caller might get stale information when doing a follow up read from a follower that has not yet received the information
+- the fastest (as it only requires one node persisting the information)
+- can continue to work even if all the followers are down, as opposed to a synchronous model
+- pitfall: if the leader fails, any information not propagated is lost
+
+
+## How does the information get replicated?
+
+Several options to replicate the changes between nodes:
+
+1. Replicate the statements
+    - simplest, as the leader just has to forward the operation it received
+    - has to pay attention to non-deterministic results that might result in a different outcome when executed again (e.g. NOW(), RAND())
+
+2. WAL shipping
+    - the leader exports it's WAL, so the actual values that would be written to the disk, not the instructions
+    - the same writes can be replayed to construct a replica, just like they would be for bringing back a single node
+    - very low-level, as the WAL might reference actual pages etc. 
+    - **Causes an incompatibility between versions**, so updates might require downtime
+
+3. A **logical log** replication
+    - a higher level abstraction that defines the operations against rows
+    - contains enough information to replicate the operation, e.g. all information for a new row, IDs for deletion, deltas for updates etc.
+    - for a transaction, we have multiple such entries, as well as delimiters for the transaction
+    - decoupled from the actual implementation, so we can do rolling upgrades or use different storage engines
+    - used in CDC, i.e. for exporting to a data WH
+
+4. Let the application handle it
+    - a trigger can be configured to write the changes to a new table
+    - application code reads and it handles the replication itself
+
+## Replication lag
+
+- main issue is that replication is not instantaneous
+- different nodes can get simultaneous read requests
+- a node can be asked for data that hasn't yet replicated to it
+
+### Reading your writes (read-after-write)
+
+- usually one node is responsible for writes, while all others can serve reads
+
+Steps:
+1. Write data (lands on node A, which replicates to B)
+2. Read from node C (inconsistently)
+
+![Read after write consistency](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/read-after-write.png)
+
+Solutions:
+
+- read information from the node that is the writer
+    - a user's writes will go to one node
+    - perform the reads for that profile owner from the write replica
+    - the writer will always see up to date information
+
+- track when a piece of information is updated
+    - for a while, serve the reads from the write replica
+    - later on, serve from all of them (presumably giving them time to replicate the information)
+
+### Monotonic reads
+
+- making several read requests will show you a monotonic sequence of changes
+- you won't see version 2 of the data, and then version 1 for a follow up request
+
+![Monotonic reads](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/monotonic-reads.png)
+
+Solutions:
+
+- balance a user's reads to the same replica instead of randomly
+- requires consistent hashing or similar to consistently send the user to the same node
+
+### Consistent prefix reads
+
+
+
+## Single leader replication
+
+- one node performs the writes, all the other nodes can serve reads
+
+### Setting up new followers
+
+1. Take a snapshot of the leader's database at a certain offset
+2. Copy the data to a new follower
+3. Ask the leader for the information since the offset (log sequence number)
+4. Ingest the rest of the data in order to catch up with the leader
+
+### What happens when a follower fails?
+
+- each follower needs to keep the current offset of the leader that it has applied to its view of the data
+- when the node reboots, or the network is restored, it asks the leader for all the data since the last offset it knows about (similar to a kafka consumer)
+
+### What happens when the leader fails?
+
+- no simple solution
+- main issues:
+    - detecting the leader is down
+    - chosing a new leader
+    - ensuring the new leader is used by all the other nodes
+
+Potential problems:
+
+1. new leader might not have all the writes replicated
+    - problematic with async replication
+        - perhaps the sync follower can be promoted, if any exists
+    - the unreplicated writes are usually discarded
+    - can be a problem if those had side effects on other parts of the system, e.g. IDs that were persisted in some other storage, service etc
+
+2. multiple nodes can believe they are the leader (**split brain**)
+    - we don't want multiple nodes accepting potentially conflicting writes, as there's no mechanism to reconcile them
+    - the old leader might come back and not know about the new one
+    - how do we detect there is more than one leader?
+        - TODO - figure out
+    - how do we ensure we only demote a single one and not both?
+        - TODO - figure out
+
+
+## Multi-leader replication
+
+## Leaderless replication
+
+

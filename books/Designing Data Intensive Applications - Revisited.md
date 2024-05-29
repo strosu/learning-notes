@@ -2,25 +2,70 @@
 
 A more in depth reading and notes from DDIA
 
-Contents
-========
-
- * [Chapter 1](#chapter-1)
-    * [Reliability](#Reliability)
-    * [Scalability](#Scalability)
-    * [Maintainability](#Maintainability)
- * [Chapter 2](#chapter-2)
-    * [Data models and Query languages](#Data-models-and-Query-languages)
-    * [The relational model](#The-relational-model)
-    * [Document model](#Document-characteristics)
-    * [MapReduce](#mapreduce-querying)
-    * [Graph databases](#graph-databases)
-* [Chapter 3](#chapter-3---storage-and-retrieval)
-    * [SSTables and LSM trees](#sstables-and-lsm-trees)
-    * [BTrees](#b-trees)
-    * [Other types of indexes](#other-types-of-indexes)
-    * [OLAP vs OLTP](#olap-vs-oltp)
-    * [Column oriented](#column-oriented-storage)
+- [Designing Data Intensive Applications](#designing-data-intensive-applications)
+- [Chapter 1](#chapter-1)
+  - [Reliability](#reliability)
+    - [Hardware failures](#hardware-failures)
+    - [Software errors](#software-errors)
+    - [Human errors](#human-errors)
+  - [Scalability](#scalability)
+  - [Maintainability](#maintainability)
+- [Chapter 2](#chapter-2)
+  - [Data models and Query languages](#data-models-and-query-languages)
+  - [Options for reprensenting our models](#options-for-reprensenting-our-models)
+  - [The relational model](#the-relational-model)
+    - [Relational charateristics:](#relational-charateristics)
+    - [Document characteristics:](#document-characteristics)
+  - [Query languages](#query-languages)
+    - [Imperative](#imperative)
+    - [Declarative](#declarative)
+  - [MapReduce querying](#mapreduce-querying)
+  - [Graph databases](#graph-databases)
+- [Chapter 3 - Storage and retrieval](#chapter-3---storage-and-retrieval)
+  - [Data structures used by the databases](#data-structures-used-by-the-databases)
+    - [Hash indexes](#hash-indexes)
+    - [SSTables and LSM-Trees](#sstables-and-lsm-trees)
+    - [B-Trees](#b-trees)
+    - [LSM vs B-trees](#lsm-vs-b-trees)
+  - [Other types of indexes](#other-types-of-indexes)
+    - [Storing values within the index](#storing-values-within-the-index)
+    - [Multi-column indexes](#multi-column-indexes)
+    - [Fuzzy searches](#fuzzy-searches)
+    - [Keeping all the data in memory (a-la Redis)](#keeping-all-the-data-in-memory-a-la-redis)
+  - [OLAP vs OLTP](#olap-vs-oltp)
+    - [Data warehouse](#data-warehouse)
+  - [Column-oriented storage](#column-oriented-storage)
+    - [Column compression](#column-compression)
+    - [Vectorized processing](#vectorized-processing)
+    - [Sort order](#sort-order)
+    - [Data cubes](#data-cubes)
+- [Chapter 4 - Encoding and schema evolution](#chapter-4---encoding-and-schema-evolution)
+  - [Formats for encoding](#formats-for-encoding)
+    - [JSON](#json)
+    - [Binary formats](#binary-formats)
+    - [Avro](#avro)
+  - [Data flow](#data-flow)
+    - [1. Through databases](#1-through-databases)
+    - [2. Through service calls](#2-through-service-calls)
+    - [REST](#rest)
+    - [RPC](#rpc)
+    - [3. Through message brokers](#3-through-message-brokers)
+- [Chapter 5 - Replication](#chapter-5---replication)
+  - [Synchronous replication](#synchronous-replication)
+  - [Async replication](#async-replication)
+  - [How does the information get replicated?](#how-does-the-information-get-replicated)
+  - [Replication lag](#replication-lag)
+    - [Reading your writes (read-after-write)](#reading-your-writes-read-after-write)
+    - [Monotonic reads](#monotonic-reads)
+    - [Consistent prefix reads](#consistent-prefix-reads)
+  - [Single leader replication](#single-leader-replication)
+    - [Setting up new followers](#setting-up-new-followers)
+    - [What happens when a follower fails?](#what-happens-when-a-follower-fails)
+    - [What happens when the leader fails?](#what-happens-when-the-leader-fails)
+  - [Multi-leader replication](#multi-leader-replication)
+    - [Conflict avoidance:](#conflict-avoidance)
+    - [Automatic resolution:](#automatic-resolution)
+  - [Leaderless replication](#leaderless-replication)
 
 
 # Chapter 1
@@ -788,7 +833,7 @@ Several options to replicate the changes between nodes:
 ## Replication lag
 
 - main issue is that replication is not instantaneous
-- different nodes can get simultaneous read requests
+- different nodes can get simultaneous write requests
 - a node can be asked for data that hasn't yet replicated to it
 
 ### Reading your writes (read-after-write)
@@ -826,7 +871,14 @@ Solutions:
 
 ### Consistent prefix reads
 
+- if a sequence of writes happens in a certain order, anyone reading those writes will see them in the same order
+- this is a problem in sharded DBs, where partitions operate independently
 
+Solutions:
+
+- have related writes go through the same replica
+    - this way, the writes will be ordered correctly in the replication log
+- vector clocks can help address this for independent writers
 
 ## Single leader replication
 
@@ -870,6 +922,57 @@ Potential problems:
 
 
 ## Multi-leader replication
+
+- multiple leaders accepting writes
+- each leader is a follower of the others and consumes their replication log
+- a good solution for multi-DC deployments
+    - each DC has one leader node and several followers
+    - writes don't have to go to a single leader, which is potentially further away
+
+- offline operations can be seen as a generic multi-leader system
+    - the local client (app) can continue serving both reads and writes while offline, just like a leader
+    - when going back online, it will replicate its changes to other leaders, while consuming their logs
+
+PROS:
+
+- the system is more robust, as losing the connection to a leader still allows writing to others
+- losing an entire DC would not cause an outage, as other leaders can still work
+
+CONS:
+- need to reconcile potentially conflicting writes
+- the conflict resolution has to converge 
+    - all replicas should get to the same value, they can't apply the writes independently
+
+Solultions:
+
+- give each write a random ID and always take the one with the highest (leads to data loss)
+- give each replica an ID and always take one of them's write (e.g. highest replica ID)
+    - also leads to data loss
+- merge the values into one (e.g. B and C become B/C)
+    - would make no sense in most scenarios
+- record both versions and let the application handle the resolution (e.g. merge conflicts in git)
+
+### Conflict avoidance:
+
+- ideally, we could avoid the conflict in the first place (what most DBs dos)
+- we just need to ensure writes for one record go through the same leader
+    - all of a user's posts will be processed by a one particular leader (perhaps picked on proximity)
+    - we get most of the benefits, without the biggest issue (as conflicts shouldn't normally occurr)
+    - problems can appear when e need to change the leader to which the writes go (e.g. if down)
+        - then, the problem turns into a conflict resolution, as we could have conflicting writes
+
+### Automatic resolution:
+
+1. three-way-merge (like git does)
+    - compares the initial version with A and B's writes
+    - asks the user to resolve any conflicts
+
+2. CRDT (conflict-free replicated data types)
+    - data structures that allow for concurrent editing 
+    - have built in algorithms for conflict resolution
+    - uses two-way merge (compares just the conflicting versions, and not the base)
+
+
 
 ## Leaderless replication
 

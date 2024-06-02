@@ -65,7 +65,16 @@ A more in depth reading and notes from DDIA
   - [Multi-leader replication](#multi-leader-replication)
     - [Conflict avoidance:](#conflict-avoidance)
     - [Automatic resolution:](#automatic-resolution)
+    - [Multi-leader replication topologies](#multi-leader-replication-topologies)
   - [Leaderless replication](#leaderless-replication)
+    - [How we write](#how-we-write)
+    - [How we read](#how-we-read)
+    - [Limitations of quorum consistency](#limitations-of-quorum-consistency)
+    - [Monitoring](#monitoring)
+    - [Sloppy quorum](#sloppy-quorum)
+  - [Detecting concurrent writes](#detecting-concurrent-writes)
+    - [Last write wins](#last-write-wins)
+    - [Determining concurrency](#determining-concurrency)
 
 
 # Chapter 1
@@ -920,7 +929,6 @@ Potential problems:
     - how do we ensure we only demote a single one and not both?
         - TODO - figure out
 
-
 ## Multi-leader replication
 
 - multiple leaders accepting writes
@@ -972,8 +980,117 @@ Solultions:
     - have built in algorithms for conflict resolution
     - uses two-way merge (compares just the conflicting versions, and not the base)
 
+### Multi-leader replication topologies
 
+1. Everyone replicates to everyone
+   - can result in writes arriving out of order
+   - Node 1 tries to replicate a Create to node 2
+   - Node 3 tries to replicate a follow up Edit to node 2
+   - the Edit arrives before the Create due to delay
+  
+2. Each node replicates to it's left / right neighbor, in a circle
+   - need to stop infinite loops: each node tags the replicated record with its ID
+   - when a replication log comes in that was already tagged by the current node, stop
+3. All replication goes through a central node
+
+- For both 2 & 3 we need a workaround mechanism when a node fails (either the central one, or a link in the circle)
+- The writes should arrive in order for 2 & 3, as they are replicated by the same node each time
 
 ## Leaderless replication
 
+- all nodes can accept writes
+- a client / extra role is responsible for sending reads / writes to multiple nodes
+- we rely on **quorum** for consistency
+- good for high-availability + low latency, at the expense of stale data sometimes
 
+### How we write
+
+- the coordinator sends the write request to all other nodes synchronously
+- as soon as we get W confirmations, confirm the write to the caller
+- this is done non-transactionally, so, if less than W nodes confirm, there will be garbage
+
+### How we read
+
+- the coordinator sends the read / write requests to all the relevant replicas (for that partition) in parallel. This doesn't have to be all the actual instances, but just those that should hold this partition.
+    - we define write threshold - a number of nodes that must confirm the write occurred before returning success (**W**)
+    - we define a read threshold - a number of nodes that must return before returning a result(**R**)
+    - if the nodes return different versions, we take the latest and repair the rest
+
+To try and avoid conflicts, we need **W + R > N**. An example for 5 nodes in total:
+- we write a new version sucessfully to 3 nodes
+- we attempt to read the new version from 3 nodes. 
+  - For normal operations, at least one of them will have the latest information
+  - We can then just pick the latest version
+  - Since we know which nodes are out of date, we can also update them at this time (asynchrnously). This is called **read-repair**
+
+- In addition to read-repair, we can have a background process that checks the data regularly
+  - this is due to read-repair only working on data is read; we might have infrequently read information that can go stale for long periods
+  - some of the information might never make it to a replica, thus reducing the percieved replication factor
+
+We can fine-tune the W and R parameters:
+- If we want fast writes, persist to fewer nodes and read from multiple (W = 1, R = N)
+- If we want fast reads, write to more nodes and read from fewer (W = N, R = 1)
+
+### Limitations of quorum consistency
+- no guarantees of consistency if using a sloppy quorum
+- concurrent writes might end up writing some of the nodes, but not all
+  - mechanism for conflict resolution (e.g. LWW)
+- no rollback mechanism for failed writes that succeeded on some of the nodes
+
+### Monitoring
+
+- For single / multi leader replication, each of them has a replication log offset.
+- This can be monitored to detect scenarios where it would fall too much behind
+- For leaderless, values might never replicate:
+  - write to 2 nodes out of 3 and consider it successful
+  - never read the value, so the 3rd one doesn't benefit from read-repair
+
+### Sloppy quorum 
+
+- when not enough replicas are avabilable for a write to a partition:
+  - we can reject the operation
+  - or have some **other** replicas accept the write
+    - this other replica is not normally responsible for the current value
+    - once the network interruption is resolved, the writes are fowarded to the "home" nodes = **hinted handoff**
+  
+- makes the writes more likely to succeed
+- might cause more read inconsistencies, as we wouldn't be aware of the other nodes outside of the usual partition having more up-to-date information
+  
+Example: N = 5, W = R = 3.
+
+1. Try to write to 1/2/3, but 3 is down and 4/5 are slow
+- write the value to 1/2
+- write the value to node 6 instead of 3
+2. 3 comes back online, 4/5 stop being slow
+3. Try to read from 1-5
+- get stale data from 3/4/5, as we don't know about 6 (not usually working for this partition)
+
+## Detecting concurrent writes
+
+For both multi-leader and leaderless replcation, we need to reconcile "concurrent" writes.
+- An essential goal of the DB is to offer consistency, even if eventually
+- This means that the values need to converge to the same on all the replicas
+- A situation where one replica would authoritatively say A while another would say B should be avoided
+
+### Last write wins
+
+- relies on providing "some" order to the two operation
+- assign each write a timestamp, and always pick the latest one
+  - this won't necessarily consider them in the order they were sent, but it allows all replicas to pick the same value
+  - will lead to a **silent data loss**: we accepted both writes and returned success, but now one value is overwritten (think WATM profiles during replication)
+  - using UUIDs as the keys is enough to prevent conflicting writes
+
+### Determining concurrency
+
+- two requests don't have to actually be concurrent in time for them to cause a replication problem
+- they just have to happen before replication gets the chance to be executed
+
+Three ways to order two events:
+- A definitely happened before B
+- B definitely happened before A
+- they were concurrent (neither knows about the other)
+
+An algorithm that can tell the options apart allows us to use LWW for a clear ordering, while leaving the concurrent conflict resolution to the application.
+
+TODO - add more info here: Version vector, vector clocks?
+https://queue.acm.org/detail.cfm?id=2917756

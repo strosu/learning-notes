@@ -1,6 +1,6 @@
 # Designing Data Intensive Applications
 
-A more in depth reading and notes from DDIA
+A more in depth reading and notes from DDIA. All images taken from the book, unless specified otherwise.
 
 - [Designing Data Intensive Applications](#designing-data-intensive-applications)
 - [Chapter 1](#chapter-1)
@@ -75,6 +75,13 @@ A more in depth reading and notes from DDIA
   - [Detecting concurrent writes](#detecting-concurrent-writes)
     - [Last write wins](#last-write-wins)
     - [Determining concurrency](#determining-concurrency)
+- [Partitioning](#partitioning)
+  - [Partitioning and replication](#partitioning-and-replication)
+  - [Approaches for partitioning](#approaches-for-partitioning)
+  - [Indexing and partitions](#indexing-and-partitions)
+  - [Rebalancing partitions](#rebalancing-partitions)
+    - [Rebalancing strategies](#rebalancing-strategies)
+  - [Request routing](#request-routing)
 
 
 # Chapter 1
@@ -982,6 +989,8 @@ Solultions:
 
 ### Multi-leader replication topologies
 
+![Multi leader topologies](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/multi-leader-topologies.png)
+
 1. Everyone replicates to everyone
    - can result in writes arriving out of order
    - Node 1 tries to replicate a Create to node 2
@@ -1094,3 +1103,142 @@ An algorithm that can tell the options apart allows us to use LWW for a clear or
 
 TODO - add more info here: Version vector, vector clocks?
 https://queue.acm.org/detail.cfm?id=2917756
+
+# Partitioning
+
+What?
+- splitting data such that each record belongs to a single partition
+
+Why? For Scalability: 
+- different partitions can live on different nodes in a shared-nothing clusted
+- scales the query load across multiple instances
+- single instance queries can run in independently
+- queries across partitions can be executed in parallel
+
+## Partitioning and replication
+
+- they are usually orthogonal
+- work together to ensure scalability and reliability
+
+- the data for a partition should have multiple copies, thus we need to replicate it
+- to avoid write conflicts, we can have each node be the leader for some partitions
+  - it is also a follower for the others assigned to it
+
+![Partitioning and replication](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/partition-replication.png)
+
+## Approaches for partitioning
+
+- the goal of partitioning is to spread the query load **evenly**
+- poor partitioning can lead to **skew**, that is one partition taking much more than others => **hot spot**
+
+We want to partition a large set of key-value pairs. Thus, we need to let each partition handle a range of the keys.
+
+To help with rebalancing:
+- we split the range of keys into much more than the nodes (similarly to virtual nodes in consistent hashing)
+- each node takes a set of partition
+  - when rebalancing, the keys stay in the same partition
+  - the partition get moved around as a unit
+
+There are two main approaches:
+
+1. Using the key directly
+
+- the ranges are not evenly spaced, as there might be more load towards one of them (unless using random keys)
+
+PRO:
+- range queries are easy, since adjacent values should live in the same partition (with some edge cases)
+  - we get this by keeping the information ordered (like a sort key in Dynamo, i.e. an SSTable)
+
+Cons:
+- need some manual intervention to break down the intervals based on the skewing
+- certain access patterns can lead to hotspots
+  - e.g. writing data using the timestamp as a partition key will result in a single instance taking all the writes
+
+
+2. Using a hashing of the key
+
+PROS:
+- introduces randomness into the partition assignment, so it should alleviate write hotspots
+  - this works as long we don't have too many requests coming in for the same key, i.e. Trump twitter
+  
+CONS:
+- we lose the ability to do range queries (at least over the partition key)
+  - since consecutive values should end up on different replicas, we'd have to query all of them
+  - a compromise is to allow for range queries *within* a partition, e.g. via sort keys in Dynamo (or Cassandra)
+
+Hotspot solution - appending some random element to the key (within a range)
+- distributes the queries to multiple partitions, as they would have different hashes
+- downside is we need to do multiple queries when reading (for every known preffix/suffix)
+- we only want to do this for a small set of keys, so we need to keep track which those are
+
+## Indexing and partitions
+
+Once we split the information into partitions, we can look at how the indexes are stored.
+Two approaches emerge:
+
+1. Local secondary index (document based partitioning)
+
+- maintains one secondary index stucture for each partition
+- the local secondary index contains information about the elements **in its partition only**. 
+- this helps keep the partition strongly consistent (e.g. local indexes support consistent reads in dynamoDB)
+- to query the secondar index, we need to query **all** partitions
+  - call *scatter-gather*, this is a very expensive operation, as we need to wait for all of them to return (long tail latency)
+
+![Local index](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/local-index.png)
+
+2. Global secondary index (term based partitioning)
+
+- an alternative is to store all the information about e term (e.g. red cars) in a single partition. 
+- the index might be too large to live in a single partition, so different *terms* need to live in different partitions
+- we can partition the index by its keys (good for range queries), or by hashes of the keys(better balancing between partition) 
+
+PROS:
+- this makes reads more efficient, as we only need to look in a single place
+
+CONS:
+- writes are more complicated:
+  - a document might have attributes that are part of several indexes
+  - their partitions might be different, so the write needs to touch multiple nodes
+  - thus, it is usually eventually consistent (like dynamoDBs)
+
+![Global index](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/global-index.png)
+
+## Rebalancing partitions
+
+- inevitable process, so it must be accounted for
+- goals:
+  - evenly distributed load between partitions
+  - availability during the rebalancing
+  - minimize amount of values that need to be moved between nodes
+
+### Rebalancing strategies
+
+0. Mod N
+
+- bad, increasing or decreasing N causes most of the keys to move (e.g. mod 10 vs mod 11)
+
+1. Fixed number of partitions
+   
+- a predefined number of partitions, chosen at the start
+- should be much higher than the number of nodes
+  - thus, each node holds multiple partitions
+  - when a new node joins, it takes entire partitions from the older ones
+  - limited to having max_nodes <= partition_count
+
+2. Dynamic partition by data size
+
+- keeps the ratio of data_size / partition_count relatively constant
+- the DB engine decides (very similar to B-trees):
+  - when a partition is too large, it gets split into two halves (and moved to another node)
+  - when two partitions are too small, we merge them into a single one
+- initial setup needs an additional help with partitioning, so it doesn't start with a single one
+- MongoDB supports both key and hash dynamic partitioning
+
+3. Dynamic partition by node count
+
+- keeps the ratio of partition_count / node_count relatively constant
+- when a node joins:
+  - it picks some random partitions from the other replicas
+  - takes half of each of them
+
+## Request routing

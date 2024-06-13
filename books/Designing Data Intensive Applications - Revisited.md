@@ -1242,3 +1242,23 @@ CONS:
   - takes half of each of them
 
 ## Request routing
+
+- once the data is split into partitions, we need a way to determine where to direct the read / writes for a particular key
+- the question boils down to: who knows which partition is assigned to which node?
+  
+Three main approaches:
+
+1. Any node accepts requests and fowards them
+- in effect, the nodes themselves keep this mapping
+
+2. A routing tier accepts the requests
+- this is responsible for fowarding the request to the right node
+
+3. The client sends directly to the right node
+- client needs the knowledge of which partition goes where
+
+![Partition assignment](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/partition-assignment.png)
+
+Zookeeper is a good candidate to store the authoritative mapping between key ranges and partitions / nodes.
+- each node registers itself with zookeeper
+- each consumer registers for notifications, and gets called when the partitions change

@@ -82,6 +82,21 @@ A more in depth reading and notes from DDIA. All images taken from the book, unl
   - [Rebalancing partitions](#rebalancing-partitions)
     - [Rebalancing strategies](#rebalancing-strategies)
   - [Request routing](#request-routing)
+- [Chapter 7 - Transactions](#chapter-7---transactions)
+  - [Single-object vs multi-object](#single-object-vs-multi-object)
+  - [Isolation levels](#isolation-levels)
+  - [Concurrency problems](#concurrency-problems)
+    - [Dirty reads](#dirty-reads)
+    - [Dirty writes](#dirty-writes)
+    - [Lost updates](#lost-updates)
+    - [Read skew](#read-skew)
+    - [Write skew](#write-skew)
+    - [Phantoms](#phantoms)
+  - [Read committed](#read-committed)
+  - [Snapshot isolation](#snapshot-isolation)
+  - [Serializability](#serializability)
+    - [2PC](#2pc)
+  - [Serializable Snapshot Isolation](#serializable-snapshot-isolation)
 
 
 # Chapter 1
@@ -1262,3 +1277,29 @@ Three main approaches:
 Zookeeper is a good candidate to store the authoritative mapping between key ranges and partitions / nodes.
 - each node registers itself with zookeeper
 - each consumer registers for notifications, and gets called when the partitions change
+
+# Chapter 7 - Transactions
+
+## Single-object vs multi-object 
+
+## Isolation levels
+
+## Concurrency problems
+
+### Dirty reads
+### Dirty writes
+### Lost updates
+### Read skew
+### Write skew
+### Phantoms
+
+## Read committed
+
+## Snapshot isolation
+
+## Serializability
+
+### 2PC
+
+## Serializable Snapshot Isolation
+

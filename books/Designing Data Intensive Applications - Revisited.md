@@ -88,15 +88,15 @@ A more in depth reading and notes from DDIA. All images taken from the book, unl
   - [Concurrency problems](#concurrency-problems)
     - [Dirty reads](#dirty-reads)
     - [Dirty writes](#dirty-writes)
-    - [Lost updates](#lost-updates)
     - [Read skew](#read-skew)
+    - [Lost updates](#lost-updates)
     - [Write skew](#write-skew)
-    - [Phantoms](#phantoms)
   - [Read committed](#read-committed)
   - [Snapshot isolation](#snapshot-isolation)
   - [Serializability](#serializability)
-    - [2PC](#2pc)
-  - [Serializable Snapshot Isolation](#serializable-snapshot-isolation)
+    - [Actual serial execution](#actual-serial-execution)
+    - [2PL (Two phase locking)](#2pl-two-phase-locking)
+    - [Serializable Snapshot Isolation](#serializable-snapshot-isolation)
 
 
 # Chapter 1
@@ -1282,24 +1282,244 @@ Zookeeper is a good candidate to store the authoritative mapping between key ran
 
 ## Single-object vs multi-object 
 
+- most DBs offer isolation at the row level
+  - this means we either update an entire value / document, or nothing
+  - we also won't see a partially written document
+  - this can be done by write-and-swap: 
+  - instead of updating a B-tree node, we write another copy with the new value / pointers
+  - the new tree is then swapped atomically
+
+- some scenarios when multi-object is useful:
+  - needing to keep multiple copies in sync: esp useful when the data is denormalized
+  - keeping FKs up-to-date
+
+- we shouldn't always rely on retrying the operation all the time:
+  - a mutating retry might have side effects
+  - the server might fail to respond due to load, which we'd be adding to
+
 ## Isolation levels
+
+Transaction isolation attempts to abstract concurrency: we can pretend no concurrency is happening, and the effects should be as-if the operations ran serially.
+
+A serializable approach offers the strongest guarantees, but that comes at a performance cost. Most DBs don't offer it by default.
+
+Various weaker isolation levels exist. Each offers more guarantees than the previous, but at a peformance hit cost.
 
 ## Concurrency problems
 
 ### Dirty reads
+
+- concurrent transactions can see each other's non-commited writes
+  
+![Dirty reads](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/dirty-reads.png)
+
+| Isolation level    | Protects against |
+| ------------------ | ---------------- |
+| Read uncomitted  | No    |
+| Read committed | **Yes**     |
+| Snapshot isolation    | **Yes**    |
+| Serializable    | **Yes**    |
+
 ### Dirty writes
-### Lost updates
+
+- concurrent operations can overwrite each other's non-commited data
+
+![Dirty writes](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/dirty-writes.png)
+
+| Isolation level    | Protects against |
+| ------------------ | ---------------- |
+| Read uncomitted  | No    |
+| Read committed | **Yes**     |
+| Snapshot isolation    | **Yes**    |
+| Serializable    | **Yes**    |
+
 ### Read skew
-### Write skew
-### Phantoms
+
+- transaction A might read row X and get 100
+- transaction B comes and changes row X to 200
+- transaction A reads row X and now gets 200
+
+- multiple rows might be involved, which can lead to an inconsistent view of the table (i.e. it was never in that actual state)
+
+- read commited is not sufficient, as we're always reading commited transactions
+- the data however changes during the transaction
+
+- also called *non-repeatable* read, as a follow up attempt would get the right value
+- particularly problematic when 
+  - doing backups (as we'd get half of the old state, half of the new)
+  - running integrity checks
+
+![Read skew](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/read-skew.png)
+
+| Isolation level    | Protects against |
+| ------------------ | ---------------- |
+| Read uncomitted  | No    |
+| Read committed | No     |
+| Snapshot isolation    | **Yes**    |
+| Serializable    | **Yes**    |
+
+### Lost updates
+
+- occurs when we need to read the value before modifying it
+  
+Examples:
+- incrementing a counter
+- adding a value to a list in a document
+- text modifications
+
+![Lost update](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/lost-update.png)
+
+| Isolation level    | Protects against |
+| ------------------ | ---------------- |
+| Read uncomitted  | No    |
+| Read committed | No     |
+| Snapshot isolation    | No    |
+| Serializable    | **Yes**    |
+
+
+1. Some DBs support atomic operations:
+- increment: SELECT counters SET value = value + 1 where key = 'foo'
+- MongoDB provides atomic operations for modifying a part of the document
+- Redis has atomic operations for some data structures
+- alternatively, serialize the operations on a single thread, to guarantee their ordering
+
+2. Explicit locking can also be used:
+- the application layer must explicitly tell the DB to take a lock on a subset of rows
+- this is done via the SELECT..FOR UPDATE command, which gets a lock on all returned rows
+
+3. **Compare-and-set** is also an option:
+- read the value
+- send a conditional update based on the read value (or a version)
+- if the condition fails, the application layer knows the data has changed and can retry the operation
+
+
+### Write skew 
+
+- two concurrent transactions read and update the same objects
+- each of them makes a decision based on the snapshot, which might not be valid anymore
+- a generalization of the Lost-Updates problem
+- usually DB support is helpful via constraints
+
+Solutions:
+- lock the rows where the condition is applied
+- in some cases, nothing to be locked (i.e. select returns nothing)
+  - introduce an artificial lock => **materialing the conflicts**
+  - split down the constraint space into a set of locks
+  - use these locks to force serializability for the competing operations
+
+Example: 
+1. booking a resource
+- we check if a resource is booked already
+- if not, we acquire it
+- since this is a two-step process, the initially read information might be outdated by the time we try to insert
+
+1. Multiplayer game:
+- users simultaneously moving an item into the same location
+
+1. Unique username / DNS name etc
+- users simultaneously creating a resource that has to have a unique name
+
+![Write skew](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/write-skew.png)
+
+| Isolation level    | Protects against |
+| ------------------ | ---------------- |
+| Read uncomitted  | No    |
+| Read committed | No     |
+| Snapshot isolation    | No    |
+| Serializable    | **Yes**    |
 
 ## Read committed
 
+- weakest isolation level, but the most common
+- prevents dirty reads/writes
+
+- writes are prevented by acquiring a lock on the row
+- since a single transaction can be modifying a row at one point, we can store the initial value, as well as the in-progress modified one
+  - any transactions reading the value will get the old one
+  - once the writing transaction commits, we swap the two values in a single operation
+
 ## Snapshot isolation
+
+- designed to address Read-skew
+- the idea is for the tranactions to operate on a consistent view of the database
+
+- writes are implemented by acquiring a lock on the row (so they block each other)
+- generalizes the concept of storing multiple versions for a single row (called MVCC - **multi-version currency control**)
+  - multiple in-flight transactions might need to see different versionsn of a row
+  - when a transaction asks for a value, we need to determine which of the values to return
+
+Essential steps:
+- transactions get a monotonously increasing Id
+- when a transaction changes the data, we tag the information with its Id
+
+Algorihtm:
+- when a transaction starts, we determine which previous transactions have already finished (e.g. 1,2,4,5)
+  - this list doesn't change during the execution, e.g. 3 finishing a bit later will be ignored
+- when reading a value, we walk back through the verision history until we find one that was written by a transaction in our list
+- follow up transactions that commit will be ignored (as our list is immutable)
+
+Alternative:
+- by using a copy-on-write mechanism for the B-tree, each transaction can get its immutable copy of the tree
+- no need to tag the information, as subsesquent transactions won't alter an older one's copy of its tree
+
+- solves the read-skew problem, but write-skews can still happen (especially with conditions spanning multiple rows)
 
 ## Serializability
 
-### 2PC
+- forcing the trsansactions to run in an actual sequence offers the strongest isolation guarantees (as there's no concurrency)
+- three main ways of achieving this:
+  - executing the operations serially, on a single thread
+  - Two-phase commit
+  - Serializable Snapshot Isolation
 
-## Serializable Snapshot Isolation
+### Actual serial execution
+
+- some subset of data systems support it: Redis, VoltDB etc
+- the throughput is limited to that of a single CPU core
+  - to actually scale the system, we rely on partitioning the data across multiple shared-nothing nodes
+  - each node can continue to execute trsansactions serially, as they would only operate on local data
+  - sometimes this is not possible, especially with multiple global secondary indexes
+- this is fesible when the dataset is in memory - reading from the disk in a single-threaded app would kill its performance
+
+
+- over HTTP, a transaction does not span multiple requests
+  - e.g. in Dynamo, we gather the different puts and send a single HTTP request that represents the transaction
+  - this helps avoid long-lived transactions
+  - helps avoid multiple trips to the DB, with an un-bound delay between them
+  - in effect it becomes a stored procedure: either imperatively (Redis and Lua), or declarative (dynamo)
+  - if we enfore the transactions being deterministic, replaying them will result in the same state
+    - thus, we can use this replay mechanism for replication
+
+![Http transaction](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/http_transaction.png)
+
+### 2PL (Two phase locking)
+
+- forces the actual serial execution when it detects two transactions might intefere with each other (by reading or writing the same row)
+- first phase: acquire the locks
+- second phase: execute and release them
+
+- if transaction A has read an object and transaction B wants to modify it, B must wait until A has finished (reads block writes)
+  - ensures B can't change the data while A has a view of it
+- if transaction A has written to an object and B wants to read it, B must wait until A has finished (writes block reads)
+  - ensures B will use the latest data when it actually executes
+
+Algorithm:
+- each object in the DB has an associated lock
+- locks have two modes: exclusive or shared
+
+- when performing a read, an operation tries to acquire a shared lock
+  - this works, unless another transaction has an **exclusive** one
+- when performing a write, an operation tries to acquire an exclusive lock
+  - the transaction must wait if any other operation has **any** type of lock on it
+
+Drawbacks:
+
+- **Can lead to deadlocks**
+- a single transaction (or one with many locks) can slow down all the others
+
+Predicate locks:
+- to prevent phantoms, we must sometimes lock on rows that don't yet exist (e.g. in a booking system)
+- another approach is to create a **predicate lock** - a lock that applies to any rows returned by a query
+
+### Serializable Snapshot Isolation
 

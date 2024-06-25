@@ -1523,3 +1523,28 @@ Predicate locks:
 
 ### Serializable Snapshot Isolation
 
+- an optimistic concurrency mechanism
+- does not lock anythign and allow potentially competing transactions to continue
+- if a conflict is detected, the latter transaction is aborted
+  - if this happens often, the performance can suffer (as it's peforming work just to roll it back)
+
+- relies on snapshot isolation, with an added mechanism to detect stale assumptions:
+- if a transaction reads data that was modified between read time - commit time, we assume it to be stale
+- two scenarios where this can happen:
+
+1. a write transaction was in progress when the snapshot was taken (but not yet commited); if this gets commited, the read is stale
+
+  ![MVCC stale read](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/ssi-write-mvcc.png)
+
+- Since we keep track of the different versions, we know transaction 43 might have acted on stale data, as it read a version of the table < 42. 
+- we just need to keep track of which transactions were ignored by the reads
+- When 43 wants to commit, we compare the list of ignored writes to the list of transations that completed already
+
+2. a write transaction came in after the snapshot and commited a different value
+
+  ![Write after read](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/write-after-read.png)
+
+- we can't use the previous mechanism, as we'd have to look back in time
+- instead, a similar mechanism to the locks in 2PC can be used
+  - when a read consumes some values, mark that with a read lock
+  - if a write comes in afterwards, it can know which other transactions are consuming the data it's changing

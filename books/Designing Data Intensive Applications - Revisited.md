@@ -75,7 +75,7 @@ A more in depth reading and notes from DDIA. All images taken from the book, unl
   - [Detecting concurrent writes](#detecting-concurrent-writes)
     - [Last write wins](#last-write-wins)
     - [Determining concurrency](#determining-concurrency)
-- [Partitioning](#partitioning)
+- [Chapter 6 - Partitioning](#chapter-6---partitioning)
   - [Partitioning and replication](#partitioning-and-replication)
   - [Approaches for partitioning](#approaches-for-partitioning)
   - [Indexing and partitions](#indexing-and-partitions)
@@ -1119,7 +1119,7 @@ An algorithm that can tell the options apart allows us to use LWW for a clear or
 TODO - add more info here: Version vector, vector clocks?
 https://queue.acm.org/detail.cfm?id=2917756
 
-# Partitioning
+# Chapter 6 - Partitioning
 
 What?
 - splitting data such that each record belongs to a single partition
@@ -1392,7 +1392,6 @@ Examples:
 - send a conditional update based on the read value (or a version)
 - if the condition fails, the application layer knows the data has changed and can retry the operation
 
-
 ### Write skew 
 
 - two concurrent transactions read and update the same objects
@@ -1413,10 +1412,10 @@ Example:
 - if not, we acquire it
 - since this is a two-step process, the initially read information might be outdated by the time we try to insert
 
-1. Multiplayer game:
+2. Multiplayer game:
 - users simultaneously moving an item into the same location
 
-1. Unique username / DNS name etc
+3. Unique username / DNS name etc
 - users simultaneously creating a resource that has to have a unique name
 
 ![Write skew](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/write-skew.png)
@@ -1498,7 +1497,8 @@ Alternative:
 - first phase: acquire the locks
 - second phase: execute and release them
 
-- if transaction A has read an object and transaction B wants to modify it, B must wait until A has finished (reads block writes)
+- if transaction A has read an object and transaction B wants to modify 
+- it, B must wait until A has finished (reads block writes)
   - ensures B can't change the data while A has a view of it
 - if transaction A has written to an object and B wants to read it, B must wait until A has finished (writes block reads)
   - ensures B will use the latest data when it actually executes

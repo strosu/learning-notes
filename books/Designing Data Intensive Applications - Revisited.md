@@ -97,6 +97,16 @@ A more in depth reading and notes from DDIA. All images taken from the book, unl
     - [Actual serial execution](#actual-serial-execution)
     - [2PL (Two phase locking)](#2pl-two-phase-locking)
     - [Serializable Snapshot Isolation](#serializable-snapshot-isolation)
+- [Chapter 9 - Consistency and Consensus](#chapter-9---consistency-and-consensus)
+  - [Consistency guarantees](#consistency-guarantees)
+  - [Linerializability](#linerializability)
+  - [Ordering guarantees](#ordering-guarantees)
+    - [Sequence number ordering](#sequence-number-ordering)
+    - [Total order broadcast](#total-order-broadcast)
+  - [Distributed Transactions and Consensus](#distributed-transactions-and-consensus)
+    - [Atomic commit and 2PC](#atomic-commit-and-2pc)
+    - [Distributed transactions](#distributed-transactions)
+    - [Fault tolerant consensus](#fault-tolerant-consensus)
 
 
 # Chapter 1
@@ -1548,3 +1558,56 @@ Predicate locks:
 - instead, a similar mechanism to the locks in 2PC can be used
   - when a read consumes some values, mark that with a read lock
   - if a write comes in afterwards, it can know which other transactions are consuming the data it's changing
+
+
+# Chapter 9 - Consistency and Consensus
+
+## Consistency guarantees
+
+Similarly to transactions, there's a tradeoff between the strength of the consistency guarantees vs performance.
+
+## Linerializability
+
+- called strong consistency
+- strongest level of consistency
+- makes the system appear as if:
+  - holding a single copy of the data
+  - all operations are atomic against it
+  
+- this allows the application to abstract the idea of multiple replicas
+
+- once a client completes a write, all follow up reads must return the new value
+- "concurrent" operations can be undefined
+
+- once a read returns a new value, any follow up operations started **after** the first one finished need to also return the new value
+  
+![Linearizable system](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/linearizability.jpg)
+
+Linearizable systems:
+- actual serial execution => actions are linear by design
+- 2PL => locks imply we get the right results
+
+Non-linearizable:
+- SSI, as it relies on Snapshot isolation, so it will see out of date information
+
+Systems that require linearizability:
+
+- leader election
+  - all nodes need to agree on a single value => zookeeper
+
+- acquiring distributed locks 
+  - a single one must be available at all times
+
+- constraints and uniqueness
+
+
+## Ordering guarantees
+
+### Sequence number ordering
+### Total order broadcast
+
+## Distributed Transactions and Consensus
+
+### Atomic commit and 2PC
+### Distributed transactions
+### Fault tolerant consensus

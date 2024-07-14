@@ -188,3 +188,41 @@ SSTables:
   - if not, search through the SSTables from the newest to the oldest
   - a bloom filter can be used to eliminate certain SSTables completely
 
+
+# Chapter 8 - URL shortner
+
+- needs to support two operations:
+  - take a URL and create a short key for it
+  - given a short key, retrieve the original URL
+
+Clarify requirements:
+- 100M writes / day => 1200 writes / sec, with 2500 writes / sec burst
+  - max entity size: 100 chars = 100 bytes => 10 GB / day => 3.5TB / year
+  - max years of retention? TTL if we want to expire them faster?
+  - max number of entities: 100M * 365 * year_count (10) => N max entities
+  - we can use a set of chars for the short URL (0-9a-zA-Z) => **62 different chars (M)**
+    - do (log(62) N) + 1 => needed number of chars for the short URL (**X = 7** in their example)
+- 10x reads => 25 000 / sec => cache required
+
+## Write path
+
+- we consume a string and must return a shorter URL
+
+1. Generate a unique ID and transform it to base M
+  - no need to check for collisions, as unique IDs will result in unique urls
+  - the length of the url will vary, starts as 1 and grows
+  - easy for an attacker do enumerate other short URLs, as the IDs are publicly exposed and incrementing
+
+2. Hash the input URL and take the first X characters
+  - might result in conflicts, so we need to check if the value is already in use
+    - if the prefix is already used, append some suffix to the input and hash again
+    - checking if it's been used would normally result in a trip to the DB
+    - we can use a bloom filter to remove some of the unnecessary checks, as most of the time we won't have already used the value
+  - the length of the URLs will always be the same
+  - does not require a separate service to generate unique IDs
+
+![Hash generation conflict](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/hashing-conflict.png)
+
+- whichever options we chose, we need to store the URL into a key-value store (e.g. DynamoDB)
+- when receiving a write request for a value we already shortened, we can return the value directly instead of a 409 for example
+  - in effect, it makes the API idempotent

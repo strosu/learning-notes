@@ -1559,6 +1559,38 @@ Predicate locks:
   - when a read consumes some values, mark that with a read lock
   - if a write comes in afterwards, it can know which other transactions are consuming the data it's changing
 
+# Chapter 8 - The trouble with distributed systems
+
+- since we're relying on a set of machines connected by a network, communication is never instantaneous.
+- delays can and will happen for various reasons outside of our control
+- it's up to the application to be able to hanlde this => we're building a reliable system from unreliable components
+
+- no accurate way to determine appropriate values for timeouts
+    - we should experiment until we find the right ones for the situation
+
+## Clocks
+
+Important: DO NOT TRY TO CORRELATE TIMESTAMPS ACROSS MACHINES
+
+- cannot rely on them having a similar state across multiple machines
+    - thus, ordering by timestamps taken across multiple machines is meaningless
+- NTP (network time protocol) can help, but not too much
+
+1. Time of day
+
+- measure time like a human would
+- usually synchronized with NTP
+    - this can mean it might get corrected if too far behind / ahead => time jumps
+    - cannot be used to accurately measure duration, as it might be negative
+
+2. Monotonic clocks
+
+- guaranteed to always move forward
+- has no further meaning associated with it, so do not compare values between machines
+- good choice for measuring timeouts (on a single machine)
+
+- monotonic IDs are particularly relevant for Snapshot Isolation, where we need to know whether a transaction should be visible to others
+    - easy on a single machine, challenging in a distributed system
 
 # Chapter 9 - Consistency and Consensus
 

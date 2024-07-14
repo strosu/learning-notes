@@ -189,6 +189,43 @@ SSTables:
   - a bloom filter can be used to eliminate certain SSTables completely
 
 
+# Chapter 7 - Unique ID Generator
+
+## Requirements
+
+- IDs must be unique
+- IDs must be sortable (so we can't just use GUID)
+- length requirement -> max 64 bits
+- large number of generations / second, >10k
+
+
+### UUID approach
+
+- easist to implement, as generation is independent of the multiple servers
+- it requires 128 bits, so it's too large
+- uuids also contain letters, so it wouldn't work
+- more importantly, they offer no ordering
+
+### Snowflake approach
+
+- we divide the 64 bits into chunks
+- as we need the IDs to be sortable, the first part should be an incrementing timestamp (counting milliseconds)
+  - how many bits do we reserve for it? 41 seems to allow for a large enough range (69 years)
+
+- this assumes timestamps are always ascending, which is not the case
+  - we get **some** ordering within the same server (excluding the clocks jumping backwards)
+  - messages generated across different instances might be out of order, due to clock skews
+
+- the second part is used to differentiate between machines (DC + machine ID etc)
+  - 10 bits allow for 1024 different instances, which should be enough
+
+- the last bits are a counter pe millisecond (reset to 0 every ms)
+  - using 12 bits would give us 4k unique IDs per instance
+  - we can tune this based on the number of instance we currently have, their capacity etc
+  - maybe we want less variance in the 2nd part of the ID and more in the latter
+
+![Snowlflake IDs](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/snowflake-id.png)
+
 # Chapter 8 - URL shortner
 
 - needs to support two operations:

@@ -263,3 +263,11 @@ Clarify requirements:
 - whichever options we chose, we need to store the URL into a key-value store (e.g. DynamoDB)
 - when receiving a write request for a value we already shortened, we can return the value directly instead of a 409 for example
   - in effect, it makes the API idempotent
+
+  ## Read path
+
+  - check the cache first
+  - if found, return the long URL as a header
+    - 301 is a permanent redirect => result gets cached by the client
+    - 302 is a temporary one => follow up requests will eventually call our servers again
+      - will lead to increased traffic, but also better metrics on the usage of the system

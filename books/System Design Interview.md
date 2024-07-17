@@ -271,3 +271,43 @@ Clarify requirements:
     - 301 is a permanent redirect => result gets cached by the client
     - 302 is a temporary one => follow up requests will eventually call our servers again
       - will lead to increased traffic, but also better metrics on the usage of the system
+
+# Chapter 9 - Web crawler
+
+- two main areas of responsability:
+  - generate URLs to crawl
+  - fetch their content and process
+    - can be saving the content for later ingestion
+    - can be building an index of the content
+    - DRM etc
+
+1. Gererating the URLS (URL dispatcher / frontier)
+- we start with a pre-seeded list, based on revelence (e.g. wikipedia, news sites etc)
+- need to respect the hosts: robots.txt, as well as politeness (frequency of polling a single domain)
+
+2. Pulling the data
+- several worker instances are polling the URL dispatcher for which URL to crawl next
+- they resolve the DNS name and retrieve the content
+- we cannot rely on the websites being plain HTML, so we need to generate them from dynamic content (js etc)
+- either the same worker can do this, or it can be a separate role
+- we get the actual content and generate its hash
+  - this allows us to discard it we've already seen it (which should be a significant chunk of the data)
+  - we store the content in S3 and drop a message for the parser workers
+  - we can use a Kafka queue here 
+    
+ Optimizations:
+ - distribute the workers performing the actual GET requests
+  - how do you know from where a website will be served?
+- aggressive timeout, as some websites will never return
+
+3. Parsing the data
+- once we've retrieve the data (via the refefence from kafka), we can have multiple consumers:
+  - one the parse the URLs for the next iteration
+  - one to parse the content for LLM
+  - build an inverted index etc.
+
+- parsing the URLs:
+  - we check we haven't already seen the URLs, we the graph contains cycles
+  - we perform additional checks based on the URL, e.g. to cap its depth
+
+  ![Web crawler](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/web-crawler.png)

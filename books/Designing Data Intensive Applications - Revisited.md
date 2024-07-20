@@ -1632,10 +1632,38 @@ Systems that require linearizability:
 
 - constraints and uniqueness
 
-
 ## Ordering guarantees
 
+- we rely on ordering to determine causality: A happened before B, so they might be correlated
+- if two operations are happening "concurrently", they should have no relation to each other
+
+Causality examples:
+- consistent preffix reads
+- multi-leader replcation: an update notification arriving before a create notification
+
+**Causally consistent** - seeing one piece of data implies seeing all the data that preceeded it. (but not necessarily all data that came before it chronologically)
+
+**Total order** - any two events can be ordered chronologically, e.g. kafka events in the same partition
+
+Consistency models:
+
+1. Linearizability = total ordering = system behaves as is there's a single copy of the data + operations are atomic
+- there are no concurrent operations in a linearizable system, as everything has to be on a single timeline
+
+2. Causality = partial ordering = some events are ordered (if they are causal to each other), while others are incomparable 
+- in practice, this is the most widespread model
+- does not sacrifice performance and availability, especially for distributed nodes
+- we need to provide the following:
+  - concurrent operations can be processed in any order
+  - when a replica processes an operation, it must make sure it also processed all the operations that happened before it
+  - version vectors can be used to acomplish this
+
 ### Sequence number ordering
+
+- the goal is to assign "some" value to each operation, such that causal operations have incrementing values
+
+
+
 ### Total order broadcast
 
 ## Distributed Transactions and Consensus

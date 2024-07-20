@@ -60,7 +60,6 @@ Properties:
 
 
 
-
 ### ElasticSearch
 
 Properties:
@@ -70,5 +69,3 @@ Properties:
 - can do point(?) queries via GET
 - can do range queries via the Search endpoint
     - returns the documents that match the query; can return just a subset of fields if specified in the query
-
-## Problems

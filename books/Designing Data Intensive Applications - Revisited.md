@@ -1698,7 +1698,7 @@ This is not sufficient when trying to decide on resource allocation, e.g. a uniq
 - for that, we'd need to know if our counter is up-to-date
 - that would imply querying all the other nodes, which is not feasible
 
-![Lamport timestamps](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/lamport-timestamps.jpg)
+![Lamport timestamps](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/lamport-timestamps.png)
 
 ### Total order broadcast / Atomic broadcast
 
@@ -1803,7 +1803,7 @@ When dealing with 2 (or more nodes):
 - process for providing atomic commits within a distributed database
 - requires an extra role of **coordinator** -> can be part of the library
 
-![2PC](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/2pc.jpg)
+![2PC](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/2pc.png)
 
 Steps:
 
@@ -1823,7 +1823,7 @@ If the coordinator fails:
 - after sending out the prepare -> a node that responded with a promise during the prepare cannot unilaterally abandon it, or commit it (as it doesn't know the future)
 - the coordinator coming back has to interpret the log and retry
 
-![2PC failure](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/2pc-coordinator-failure.jpg)
+![2PC failure](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/2pc-coordinator-failure.png)
 
 ### Distributed transactions
 ### Fault tolerant consensus

@@ -97,12 +97,17 @@ A more in depth reading and notes from DDIA. All images taken from the book, unl
     - [Actual serial execution](#actual-serial-execution)
     - [2PL (Two phase locking)](#2pl-two-phase-locking)
     - [Serializable Snapshot Isolation](#serializable-snapshot-isolation)
+- [Chapter 8 - The trouble with distributed systems](#chapter-8---the-trouble-with-distributed-systems)
+  - [Clocks](#clocks)
 - [Chapter 9 - Consistency and Consensus](#chapter-9---consistency-and-consensus)
   - [Consistency guarantees](#consistency-guarantees)
   - [Linerializability](#linerializability)
   - [Ordering guarantees](#ordering-guarantees)
     - [Sequence number ordering](#sequence-number-ordering)
-    - [Total order broadcast](#total-order-broadcast)
+    - [Laport timestamps](#laport-timestamps)
+    - [Total order broadcast / Atomic broadcast](#total-order-broadcast--atomic-broadcast)
+    - [Linearizable storage from Total order broadcasts](#linearizable-storage-from-total-order-broadcasts)
+    - [Total order broadcast from linearizable storage](#total-order-broadcast-from-linearizable-storage)
   - [Distributed Transactions and Consensus](#distributed-transactions-and-consensus)
     - [Atomic commit and 2PC](#atomic-commit-and-2pc)
     - [Distributed transactions](#distributed-transactions)
@@ -1661,10 +1666,113 @@ Consistency models:
 ### Sequence number ordering
 
 - the goal is to assign "some" value to each operation, such that causal operations have incrementing values
+- we cannot use time-of-day timestamps due to jumps, but we can use a monotonous sequence that gets incremented on each operation
+- these are compact and provide a total ordering, i.e. any two can be compared
+- we can assign these such that they also imply causality:
+  - if A happened before B, A's id will be smaller than B's
+  - if A and B happened concurrently, no guarantees, but the 2 operations cannot be correlated
 
+- When there's a single leader, it is sufficient to apply the replication log in the order in which it was emitted.
 
+- When there are multiple generators (e.g. due to multiple leaders or partitioning), various approaches that boil down to spliting the ranges:
+  - each generator has its own disjunct set of Ids
+  - we get an ordering guarantee within that set, but not across them
+  - 
+  - simiarly to Kafka and the ordering guarantees within a single partition, but not across them
 
-### Total order broadcast
+### Laport timestamps
+
+- each node has an ID and a counter value
+- when comparing 2 operations: 
+  - the one with the highest ID always comes later
+  - in case of ties, the highest nodeId comes later
+
+- on each operation, the server increments its internal counter
+- the internal counter is returned to the caller
+- the callers include the latest counter in the follow up requests - this is by design the highest they have seen for that value
+- when a server receives a counter higher than its own, the internal one gets overwritten
+
+While this offers us the ability to compare any 2 operations, it does so only once they have finished.
+
+This is not sufficient when trying to decide on resource allocation, e.g. a unique username. 
+- for that, we'd need to know if our counter is up-to-date
+- that would imply querying all the other nodes, which is not feasible
+
+![Lamport timestamps](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/lamport-timestamps.jpg)
+
+### Total order broadcast / Atomic broadcast
+
+A protocol that fulfills the following:
+- the distributes all messages, in the same order, to all the nodes
+- has no relation to causality, as we don't place any constraints on the actual ordering of the messages
+
+- this is a very useful property for DB replication
+- every replica is guaranteed to process the replicated operations in the same order
+
+- while messages cannot be deliver while a replica is down, they will be delivered in the correct order when it comes back up
+
+Applications:
+1. DB replication 
+- if all nodes agree on an order of operations => all operations are applied in the same order
+
+2. Serializability
+- each transaction is deterministic
+- all nodes process them in the same order => ????
+
+- we can look at total order broadcast like an append only log
+  - when a message is delivered, it is appende to the log
+  - all nodes must deliver the messages in the same order
+
+- can be used as a fencing token generator:
+  - each request to acquire a lock is appended
+  - it gets a monotonously incrementing value
+  - this value can be used as the fencing token
+
+Zookeeper provides an implementation:
+
+- there is a FIFO connection between any two instances
+- uses TCP for the ordering guarantees:
+  - if a packet is delivered, all the ones before it have also been delivered
+  - once a channel is closed, no other messages can come through
+
+### Linearizable storage from Total order broadcasts
+
+Trying to register a unique name - Assuming we have a total order broadcast protocol:
+
+1. Write a message tentatively reserving the username to the log. Note: this does not guarantee you actually get it!
+2. Read the log until you encounter your message
+3. Check if any other message in between claimed the username
+   - if none, you actually commit and take the username
+   - otherwise, abort
+
+Why this works:
+- log messages are delivered to all nodes in the same order
+- all nodes will share the same view and have a consisten view of the ordering
+- for several concurrent writes, we can easily tell which one was first
+
+- this guarantees writes are linerizable
+- we can read from a replica that is somewhat behind, and not see the latest data
+
+To offer linearizable reads:
+0. Read from a replica that has synchronous writes
+1. Wait for the current replica to be up to date:
+   1. Add a message to the log and wait for it to be received
+   2. OR Query the leader for the offset and wait until it is delivered
+   - At this point, we have the latest data for that point in time, so we can accurately respond
+
+### Total order broadcast from linearizable storage
+
+Assume we have a linearizable storage:
+
+1. We use a counter that can be incremented atomically
+2. When an operation comes in, we mark it with the current value and increment it
+3. The message is sent to all other nodes, tagged with the ounter value
+4. The message sequence is a continuous range of values
+   1. If a node receives message 5 but misses message 4, it has to wait until it gets the missing one
+   2. Missing messages have to be resent, but the ordering is persisted
+
+The problem is reduced to having a counter value that is consistent across a distributed system
+=> **Total Order Broadcast = Linearizable Storage = Consensus**
 
 ## Distributed Transactions and Consensus
 

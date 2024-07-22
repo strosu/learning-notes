@@ -1776,6 +1776,54 @@ The problem is reduced to having a counter value that is consistent across a dis
 
 ## Distributed Transactions and Consensus
 
-### Atomic commit and 2PC
+- consensus is required for leader election
+- distributed transactions also need some form of it, e.g. we need them to succeed on all the nodes (or abort)
+
+### Atomic commit
+
+Flow for a single node:
+- data is written to the disk
+- the commit message is also written -> this is done atomically, and represents the single point of no return
+  - if the commit message is successfully written, the data WILL be persisted, even across a DB crash
+  - if anything happens before the message is written, the transaction is in effect discarded
+
+When dealing with 2 (or more nodes):
+- we can't pick the moment in time when the first one commits as the point of no return
+  - this is due to the fact that we don't know whether the 2nd one will succeed
+
+- multiple reasons why one node might commit and another abort
+- if that's the case, we end up with a permanent inconsistence between the nodes
+- once a transaction is committed (on any node), other transactions will start seeing it and might rely on that data
+  - thus, we cannot cancel a transaction once it is committed
+
+=> **a node must commit only if it's sure ALL other nodes will commit too**
+
+### Two-phase commit
+
+- process for providing atomic commits within a distributed database
+- requires an extra role of **coordinator** -> can be part of the library
+
+![2PC](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/2pc.jpg)
+
+Steps:
+
+1. client sends data to the nodes
+2. client initiates a commit 
+- the coordinator asks all nodes to **prepare**
+- each node either responds:
+  - with a failure
+  - with an approval => means the node promises to commit the transaction if asked and cannot refuse / fail
+3. if all nodes approved, the coordinator writes the commit message to its log -> commit point
+4. the commit request is sent to all participants
+  - if the request fails or timesout, the coordinator must retry forever
+  - a node failing implies it has to commit the transaction before it recovers
+
+If the coordinator fails:
+- before sending out the *prepare* message -> each node can abort their transaction
+- after sending out the prepare -> a node that responded with a promise during the prepare cannot unilaterally abandon it, or commit it (as it doesn't know the future)
+- the coordinator coming back has to interpret the log and retry
+
+![2PC failure](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/2pc-coordinator-failure.jpg)
+
 ### Distributed transactions
 ### Fault tolerant consensus

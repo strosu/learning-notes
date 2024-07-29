@@ -1803,7 +1803,7 @@ When dealing with 2 (or more nodes):
 - process for providing atomic commits within a distributed database
 - requires an extra role of **coordinator** -> can be part of the library
 
-![2PC](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/2pc.png)
+![2PC](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/2PC.png)
 
 Steps:
 
@@ -1826,4 +1826,91 @@ If the coordinator fails:
 ![2PC failure](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/2pc-coordinator-failure.png)
 
 ### Distributed transactions
+
+1. Single system transactions:
+- distributed transactions within the same DB, just spanning different nodes
+- often feasible, see dynamoDB (with some limitations)
+- the technology controls the protocol and it's shared by all the nodes
+
+2. Multi-system transactions:
+- participants from 2 or more technologies
+- much more difficult to provide atomicity
+- requires that all participants support the same atomic commit protocol
+  - all nodes participate in the same 2PC protocol
+  - if one system does not support it, we will end up with an operation executed multiple times
+
+X/A transactions are one standard that seems to be supported, at least for relational DBs
+- offers the building blocks / API calls for 2PC acorss multiple systems that support it
+- same problem as 2PC, as a participant can be stuck forever with rows locked
+- requires manual intervention to commit or rollback
+- does not scale, not very interesting in this context
+
 ### Fault tolerant consensus
+
+- we saw with 2PC that the coordinator is a single point of failure
+- there can be cases when nodes are stuck indefinitely waiting for the coordinator to come back
+
+A **consensus** algorithm must fullfil the following:
+
+- all nodes agree on the result
+- each node decides a single time
+- if a node decides value V, it was proposed by some node (no hacks)
+- the algorithm must be finite, assuming a majority of nodes are working
+  - if there's only a minority of nodes online, the algorithm is halted
+  - they will not reach a consensus (instead of reaching a wrong one)
+  - this is due to the fact that the other partition might have majority and might decide something else
+
+- Most algorithms descide on a **sequence** of values that satisifies the properties above. 
+- This turns it into a total order broadcast solution:
+
+1. each round, nodes proposes a value they want to send next
+2. they all agree to which value should be the one broadcast
+
+- total order brodcast = multiple rounds of consensus, with each round sending out a single value
+- all nodes decide to deliver the same value
+- messages are not duplicated / each node decides just once
+
+### Epoch numbering
+
+- we provide a weaker guarantee compared to "a single leader" => "a single leader per election cycle / epoch"
+- epoch numbers are totally ordered and monotonically increasing => we can always pick the leader from a later election to be the true one => no more split brain
+- to be elected, each leader needs a vote from an absolute majority of nodes (e.g. 3 out of 5 in total)
+
+Compared to 2PC:
+- leaders are not manually selected (unlike a coordinator)
+- no need for **all** nodes to agree to commit, a majority is sufficient
+- we have a recovery mechanism in place for leader failure
+
+Drawbacks:
+- leader election takes time from actually serving the requests
+- might end up in a scenario where it's all we do
+
+### Raft discussion
+
+## Membership and coordination
+
+- hold small amounts of data, operating on it in memory
+- persisted to the disk for durability
+- the data is replicated across all nodes, using a fault-tolerant total order broadcast
+  - this means we have a consensus across all the nodes
+
+Other supported operations:
+
+1. Linearizable atomic operations => distributed lock
+  - the lock is actually a lease, since it has an expiry time
+2. Total ordering of operations
+  - when a lock is acquired, the operation gets a fencing token (monotonously increasing operationId: zxid + cversion)
+  - this can be used to prevent issues arrising from process pauses
+3. Failure detection
+  - client and server exchange heartbeats
+  - when no heartbeats received for a predetermined period => node is dead => all locks held by it are released
+4. Change notification
+  - clients can subscribe to events related to changes on a node
+  - since other clients joining / leaving result in a node change, this can be a notification service for changes in membership
+
+  Examples of uses:
+  - when a node joins / leaves, we might need to do partition rebalancing
+  - knowing when this happens without having to poll is efficient
+  - service discovery: zookeeper can be used instead of DNS if we require consensus / more up-to-date information (no caches)
+
+  Note: we can use Zookeeper for automatic failover detection / correction.

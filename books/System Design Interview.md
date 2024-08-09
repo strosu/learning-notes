@@ -311,3 +311,185 @@ Clarify requirements:
   - we perform additional checks based on the URL, e.g. to cap its depth
 
   ![Web crawler](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/web-crawler.png)
+
+  
+# Chapter 10 - Notification system
+
+- multiple types of notifications
+    - SMS
+    - push notifications: differentiate between iOS and Android
+    - email
+
+- need to offer an opt-out mechanism (GDPR etc)
+- we use various services for each type of notification:
+
+1. For mobile, both Apple and Google offer their intermediary service we have to go through
+  - we require a device identifier, which can be obtained after getting consent from the user
+2. For SMS, something like Twilio
+3. For email, MailChimp etc
+
+Two workflows:
+
+1. Gathering contact information
+  - device info vs email vs phone number
+  - this is the metadata, store in a relational DB probably. Some document store can also work, as there's little correlation between different users
+
+  - we can have a users table + a device table, with a simple join between them
+  - need to have the correlation, as the notification shouold be addressed to a user -> might have to fan out to multiple devices
+
+2. Send the actual notifications
+
+- our server receives a request to send a notification to user A
+- it looks up which types of notifications this needs to result in (e.g. just push notifications vs email etc)
+  - the requester might also be able to specify this
+
+- we want to allow the notification system to be pluggable, e.g. to support new types of notifications easily
+- a simple approach is to decouple the actual sending logic from the rest
+  - for each type of notification we support, we have a set of workers
+  - they get requests from a queue and act on them
+  - offers good decoupling between deciding what notifications to send out vs the actual sending logic
+  - offers good scalability, as we can adjust the capacity based on throughput * avg time to process a request (e.g. email might take longer etc)
+
+- we also provide a queue for each set of workers
+- thus, the notification service is responsible for preparing the needed types of notifications and dropping them in the queue
+- it can then return to the caller with a promise that the request will "eventually" succeed
+
+- the service needs to retrieve the information we persisted in step 1
+  - we can cache the user / device information if it's not too large
+
+### What type of queue should we use?
+
+- since we need retries and don't want to block, Kafka might not be the best candidate
+  - for Kafka, we can't acknowledge follow up messages until we process the current one
+- look into AWS SQS 
+  - offers exponential backoff retries 
+  - can hide a message so we process the rest in the queue
+
+## Deep dive
+
+1. Reliability
+- we should never lose data
+- the ordering is not the most important aspect
+
+- pushing to a queue is not sufficient?
+  - we can always store the notification request in a DB and only return to the caller once that's been done
+
+2. Exactly-once delivery
+- is probably not achievable
+- we can always lose the successful response from the 3rd party
+  - we have to retry in those cases, as we don't know the outcome
+  - unless the 3rd party offers some idempotency mechanism, we will deliver messages more than once
+
+3. Notification templates
+
+- we should have a small set of templates, relative to the number of requests
+- the callers can specify a type of notification, together with the request information (content, recipient)
+- no need to send the entire body of the message each time
+  - additionally, the senders don't need to know the final format of the messages
+- we have to store these somewhere
+  - both persistent storage
+  - a cache would be a good fit, since they shouldn't occupy too much (as it doesn't scale with the number of users or notifications)
+
+4. Notification settings
+
+- before sending any notification, we need to make sure the user gave their consent
+- this can be per channel if needed
+- this also touches on rate limiting, as we don't want to spam the users
+
+5. Sending failure and retries
+
+- the workers are trying to perform the notification synchronously
+- if the flow succeeds, we remove the nofication from the queue
+- otherwise, leave it there (with an exponential backoff visibility)
+- SQS gives us information on the number of performed retries
+  - we can then move it to a DLQ and alert the oncall person
+
+6. Monitoring
+
+- we need to strictly monitor the amount of notifications waiting to be processed
+- we need to alert when it reaches a particular threshold
+  - this is so we can adapt the number of workers (add or remove some)
+- additionally, we need monitoring when a notification fails to be delivered multiple times
+
+7. Analytics
+
+- we can track each notification's lifecycle
+  - created
+  - delivered
+  - opened / acted upon / unsubscribed
+- use a state machine for easier implementation 
+
+![Merkle tree](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/notification-service.png)
+
+
+# Chapter 11 - News feed
+
+Two main flows:
+- publishing content
+- retrieving the feed for a particular user
+
+Overall concerns:
+- we only support authenticated calls
+- we use a rate limiter to prevent abuse
+- all of these (and more) can live in an API gateway
+  - load balancing
+  - SSL termination etc
+
+## Publishing a post
+
+What happens when a user creates a post?
+
+1. Analyse it for malicious / illegal content
+
+2. Persist the post
+  - store the large pieces of data in S3
+  - store the post itself in a DB
+  - cache the result? Why?
+
+3. Insert it into other news feeds (if we want to)
+  - what do we store here? Just a postId
+  - how do we store a news feed?
+  - book suggests keeping it all in caches for fast retrieval
+    - it this fesible? It can be partitioned well, so we should be able to scale out
+    - we can also rebuild these in case they are lost?
+
+Two approaches:
+
+- prepare the feeds when a new post is created (fanout on write)
+  - the feed is pre-computed and is pushed to friends immediatelly
+  - reading is fast, since it's already calculated
+  - useful if we expect the feed to actually be consumed; not the case for rarely logging in users
+
+  - updating all the different feeds can be resource consuming
+
+
+- prepare the feeds when a user asks for them (fanout on read)
+  - does not waste resources for users logging in rarely (e.g. compute it once a month)
+  - fetching is slow, as it has to be calculated just in time
+
+Normally we place a lot of value on retrieving the feed fast, so it's best to prepare most feeds on write.
+Depending on the max amount of connections, it might be impractical to do this for all users. 
+- we can define a threshold: if a message has to be delivered to more than N feeds, we do it on read (e.g. Obama posting smth on facebook etc)
+- this is definitely needed when there's no upper bound, might work if all users are limited to X friends (although bad for business perhaps)
+
+Concrete steps:
+
+a. fanout service gets the list of friends of the current user (so we know which feeds to update)
+  - we can use a graphDB or similar as an efficient model for this
+
+b. we need to determine if a message should be delivered to a particular friend
+  - users might be able to mute each other, or post a message to only a subset of friends
+  - determine the subset of users whose feeds have to be updated
+
+c. enqueue a command for the feed population worker
+  - either one notification for the entire list of friends (i.e. batches), or one by one 
+
+d. the fanout worker / feed population worker inserts information in the feed caches
+  - for each user, store a list of the most recent N posts (just via their ID)
+  - it should be ok to be someowhat slower to retrieve posts from years ago, i.e. not cached ones
+
+[INSERT POST IMAGE]
+
+4. Notify other users
+
+- should have the same verification logic as the fanout service

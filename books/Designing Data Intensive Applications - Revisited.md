@@ -1914,3 +1914,99 @@ Other supported operations:
   - service discovery: zookeeper can be used instead of DNS if we require consensus / more up-to-date information (no caches)
 
   Note: we can use Zookeeper for automatic failover detection / correction.
+
+# Derived data
+
+We distinguish each piece of data / system storing data in one category:
+
+- source of record
+  - holds the authoritative copy of the information
+  - when new data comes in, it is written here
+  - each fact is represented just once
+
+- a derived data view
+  - takes data from a system of record and transforms / processes it
+  - can always be recreated from the original source (e.e. a cache)
+  - is used to offer diferent views of the same data, e.g. an index
+
+**Always a good idea to clearly differentiate which data store holds which type of data for our system.**
+
+# Chapter 10 - Batch processing
+
+Different types of systems, based on their response times:
+
+1. Real time (user facing)
+
+- the user expects a response
+- when the service receives a request, it tries to fulfill it as soon as possible
+- *performance measure: response time and availability*
+
+2. Offline systems - batch processing
+
+- takes a large amount of data as its input
+- after some time, produces its output
+- jobs can be long running, without anyone waiting for their output
+- triggered by schedulers
+- *performance measure: throughput (how long the jobs takes based on some input)*
+
+3. Near-real time (stream processing)
+
+- consumes inputs and produces outputs (similarly to a batch system)
+- is not triggered / awaited by a user directly 
+- is run based on events coming in, shortly after they happen
+
+
+# Chapter 11 - Stream processing
+
+- as opposed to batch processing, it allows us to handle an unbound amount of data, without splitting it into artificial chunks.
+- batch processing must define precise intervals at which to run, so it inevitably introduces a delay.
+- stream processing is simply batch processing with a very small window size (length goes towards 0)
+
+Some properties of events:
+
+- an **event or record** is an small, self contained and immutable piece of information. 
+- it usually contains a timestamp of when it happened
+- it can be encoded in various ways
+- it is written once by a producer
+- can be consumed by multiple consumers (the producer doesn't have to be aware who those are)
+
+## Message brokers
+
+- a dedicated "database", optimised for handling message streams
+- allows producers to come and go (e.g. server-oriented vs peer-to-peer)
+- the problem of durability is offsourced to the broker, once it accepts a message
+- they allow buffering the events, in case they can't be consumer fast enough
+- by definition they represent an **async** process - the producers do not wait for the consumers to process a message
+
+
+Differences compared to a DB:
+
+- designed to not stored data indefinitely 
+- if data is deleted as soon as consumed, it should be safe to assume the set is relatively small compared to a DB
+- instead of indexes, other mechanisms allow consuming just a subset of data (e.g. topics, partitions)
+
+## Patterns of delivery
+
+Two scenarios are supported:
+1. dividing the load 
+  - each message is delivered to a single consumer that is part of the group
+  - this allows the a consumer (group) to scale horizontally
+  - we can add more consumers to the group if the processing is slow
+
+2. fanout
+  - each message is delivered once to each consumer group
+  - the consumer groups represent a separate conceptual consumer
+  - e.g. both system A and system B want to be notified when an event comes in
+  - allows multiple unrelated consumers to subscribe to the same set of notifications
+
+These can be combined (e.g. in Kafka):
+- a consumer group represents a logical "consumer", e.g. a service
+  - messages are delivered **once to each consumer group**
+- within that group, we might have one or more actual consumers  
+  - **only one of the actual consumers receives the message from the broker**
+
+  ## Acknowledgements and redelivery
+
+  - message is considered to be processed only once it has been acknowledged
+  - if the processing takes too long / times out, the message is delivered to another consumer
+    - in effect, a message **might** be delievered multiple times

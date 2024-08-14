@@ -493,3 +493,50 @@ d. the fanout worker / feed population worker inserts information in the feed ca
 4. Notify other users
 
 - should have the same verification logic as the fanout service
+
+
+## Retrieving a feed
+
+- most of the time, the feed will be prepopulated
+- we also need to take into account users with a heavy following, for which we don't insert at write time
+- we append any recent messages from vip users into the computed feed
+
+
+# Chapter 12 - Messaging service
+
+- should allow sending messages securely from user A to user B if both are online
+- if a user is not online, it should deliver those messages once they come back
+- users can start group chats with up to X users 
+- media can be part of the messages
+
+- how long do we need to store the message history server side?
+
+Non-functional:
+
+- deliver messages with a low latency
+- if a message is accepted by the server, guarantee its eventual delivery
+- scale to a large amount of users
+- highly available system
+- messages should not be stored longer than necessary
+- security / spam prevention / content analysis
+
+# Basic design
+
+- we can identify a 1-1 chat as a case of a group chat with 2 participants
+- the whole system can be seen as delivering messages from a user to a group, and from the group to its users
+
+The communication between the client and server is bi-directional. Thus, we can use **websockets**.
+
+Types of messages the client initiate:
+
+- createChat
+- modifyParticipants
+
+- sendMessage
+- addAttachment
+- ackMessage
+
+Types of messages the server initiates:
+
+- newMessageReceived
+- chatParticipantsUpdated

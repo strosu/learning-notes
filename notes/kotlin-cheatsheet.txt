@@ -1,0 +1,53 @@
+ARRAYS:
+
+toIntArray(1, 2, 3)
+
+val numbers = IntArray(5) { 10 * (it + 1) }
+
+.toTypedArray() -> turns a list into an array
+
+
+DICTIONARY:
+
+    val map = mutableMapOf<String, MutableList<String>>()
+    map.values.toList() -> List<List<String>>
+
+MINHEAP:
+
+val queue = PriorityQueue<ListNode> { l1, l2 -> l1.`val` - l2.`val` }
+queue.add(node)
+queue.remove()
+queue.peek()
+
+
+STRINGS:
+
+val x = word.toCharArray().sorted().joinToString("")
+
+
+RANDOM:
+
+(0..n).random()
+
+
+COMPARABLE:
+
+data class Segment(val start: Int, val end: Int): Comparable<Segment> {
+    override fun compareTo(other: Segment): Int {
+        // -1 if current is smaller than other
+        // 1 if current is larger than other
+        // 0 if equal
+    }
+}
+
+BINARY SEARCH:
+
+val index = list.binarySearch(22)
+
+// if we find the index, returns >=0
+// otherwise, returns the inverted index
+
+val index = list.binarySearch(22)
+val insertionIndex = -(index + 1)
+list.add(22, insertionIdex)
+

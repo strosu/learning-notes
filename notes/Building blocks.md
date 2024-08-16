@@ -1,18 +1,16 @@
-# Building blocks
-
-## Scaling
+# Scaling
 
 - horizontal vs vertical
 - horizontal is not always the best choice
     - it involves more complexity
     - we should try to scale verically when possible
 
-### Work distribution
+## Work distribution
 
 - to get the most out of multiple machines, we need to ensure data is distributed **evenly** across them
 - simple round-robin is sufficient most of the time, it our requests are stateless and transient
 
-### Data distribution
+## Data distribution
 
 - distributing work close to where it will be executed
 - ideally a node will have all the data it needs to perform its work
@@ -20,22 +18,30 @@
     - the more nodes, the more likely a request will fail
     - we're vulnerable to long-tail latencies, where 1 request is delaying the entire set
 
-## Indexing
+# Indexing
 
 - keeping additional views of the data for fast retrieval
 - trades more space (and potentially slower writes) for significantly faster reads
     - no free lunch, all indexing makes writes slower
 - in a distributed DB, it will most likely be eventually consistent (GSI in dynamoDb, CDC with Elastic etc)
 
-### Geospatial indexing
+## Geospatial indexing
 
-### Full-text indexes (Elastic)
+## Full-text indexes (Elastic)
 
 - allows lookups based on terms
     - should work for similar words, synnonyms, typos etc
 
+Properties:
 
-## Communication protocols
+- allows searching on documents persisted inside it
+- data is sent in JSON format
+- can do point(?) queries via GET
+- can do range queries via the Search endpoint
+    - returns the documents that match the query; can return just a subset of fields if specified in the query
+
+
+# Communication protocols
 
 - the client and server need to have a common protocol for communication
 - most oftenly used is HTTP -> good for request-response usually
@@ -43,14 +49,97 @@
 Request - Response => HTTP (REST)
 Response - Response - Response etc -> Server Sent Events
 Bidirectional -> Websockets
+    - long polling can be an option => server doesn't respond right away, keeps the connection alive until it has a response
 
-## Data structures
 
-### LSM trees deep dive
+# Core blocks
 
-## Tools
+## Databases
 
-### Redis Pub/Sub
+### Relational
+
+- postgres
+
+Main properties:
+- good for very structured data
+- enforce data type contraints via the column type
+- enforce consistency via ForeignKeys (for better or worse, see parsing question)
+- more difficult to scale horizontally
+
+- allows any types of queries, i.e. we don't need to optimize for them from the start
+- allows long-running, interactive transactions
+    - we can read a record, do some actions and write back in the same transaction
+    - dynamo only allows sending all the operations in a single transaction
+
+- usually strongly consistent (might not be the case with multiple replicas)
+
+Usecase:
+
+- joins between tables
+- great index support:
+    - unlimited number
+    - allows for multi-column indexes
+    - allows for specializezd types, e.g. geospatial or full-text 
+- long-running, interactive transactions
+
+### Non-relational
+
+Types:
+- key-value (Redis)
+- document (dynamo)
+- graph (neo4j)
+- columnar (cassandra?)
+
+Properties:
+- schemaless
+- scale horizontally with ease, so can hold more data that a relational one
+- data models can evolve without a schema change
+    - schema interpretation is passed to the reader
+
+- usually eventually consistent (at least in dynamo's case)
+    - dynamo allows configuring it on read
+
+## Blob storage (S3)
+
+Usecase:
+
+- used when we have large amounts of data
+- good especially for files we don't need to index or interpret
+    - much cheaper to store information than dynamo for example
+
+Properties:
+
+- durable, copies are replicated automatically
+- scale to "infinity"
+- security features for controlling access to the data, as well as in-flight
+- when we control the client, we can bypass the server entirely
+    - **pre-signed** URLs allow the server to just generate a URL for the client
+    - the client uploads the file directly to S3
+- large files should be split into chunks - **multi-part** uploads
+    - chunks are ordered to S3 and tagged with metadata
+    - once we notify S3 we're done, the files are reconstructed
+    - we can upload chunks in parallel
+    - more resilient, can retry failed uploads independently
+    - **no expiry** => we need to clean up parts ourselves
+
+- S3 glacier => trade access speed for much cheaper storage
+    - useful for backups
+    - rarely accessed information, e.g. audit records etc
+
+
+## Search optimized databases
+## API Gateway
+## Load Balancer
+## Queue
+## Streams / Event Sourcing
+## Distributed Lock
+## Distributed Cache
+## CDN
+
+
+# Tools
+
+## Redis Pub/Sub
 
 Properties:
 
@@ -70,7 +159,7 @@ Flow:
 - when a message is pushed to channel A, redis will notify user B
 
 
-### Redis sorted sets
+## Redis sorted sets
 
 Properties:
 
@@ -101,17 +190,3 @@ Properties:
     - O(log(n)) for insertion, deletion of a random element (need to find it, and update up to log(N) other lists upwards, e.g. if we update the middle)
     - the elements are stored in order by design, so getting range of M elements starting from a particular one is O(log(N) + M)
         - we find the element in O(log(N)) and then iterate for another M elements on the lowest level of the list
-
-
-### ElasticSearch
-
-Properties:
-
-- allows searching on documents persisted inside it
-- data is sent in JSON format
-- can do point(?) queries via GET
-- can do range queries via the Search endpoint
-    - returns the documents that match the query; can return just a subset of fields if specified in the query
-
-
-020 580 8898

@@ -128,8 +128,60 @@ Properties:
 
 
 ## Search optimized databases
+
+- useful for searching through an amount of text and finding the matches
+- regular DBs are not suited, as they require an exact match for a range
+    - they scan the entire set normally when querying for a regex (as we can't index for all the terms)
+
+- a search optimized DB breaks the text into tokens and indexes them
+
+- it takes some text and breaks it down into tokens
+- we keep indexes for each token, and just add the document reference to the list of references for each token (**an inverted index**)
+- additionally, we do some transformations:
+    - **stemming** is reducing the words to their root, e.g. running -> run; we also map synnonyms to each other
+    - **fuzzy searching** allows us to check words within a certain edit distance; useful for typos
+
+Elastic:
+
+- distributed, scalable
+- ingests documents and allows querying for arbitrary strings inside them
+- eventually consistent
+
+- a good choice when we want to offer search capabilities, e.g. look up for a product name (with potential typos)
+
+Structure:
+
+- documents are individual entries (i.e. a row)
+- a collection of documents is called an index (i.e. a table)
+
+- the documents are partitioned across multiple nodes
+- when a range request request comes in, we scatter-gather it:
+    - each node has to do a mini-search on its available data
+- for a point query, we can use something along the lines of consistent hashing to determine which replica is the leader for that partition
+    - we can query the leader directly
+
+Various uses:
+- assign weights to different document fields (e.g. headline vs body)
+- assign a fuzziness to the query, specifying if we're also looking for 
+
 ## API Gateway
+
+- plays the role of routing middleware => sends requests to the right service, based on the url
+- offloads some of the cross-cutting non-functional features:
+    - authentication
+    - SSL termination
+    - rate limiting
+    - logging
+
 ## Load Balancer
+
+- distributes traffic between different instances of the same service
+- should allow for different policies, e.g. roundRobin, geographical etc
+- we shouldn't care to which instance the request is sent to
+    - if we want deterministic directing, use consistent hashing
+
+- can be used right after / in combination with an API gateway
+
 ## Queue
 ## Streams / Event Sourcing
 ## Distributed Lock
@@ -138,6 +190,106 @@ Properties:
 
 
 # Tools
+
+## Kafka
+
+Should be the go-to for:
+- event sourcing
+- fanning out, i.e. an event being consumed by multiple services
+
+### Properties:
+
+- durable, ensures no messages are lost (via replication)
+- scales by adding more instances
+- messages are grouped in topics
+    - a topic can scale across instance by splitting it into partitions => different partitions can live in different servers
+
+### Messages
+
+- contain a key (used for partitioning), and a payload
+- optionally can contain headers and a timestamp
+
+### Partitioning
+
+- a partition is a physical grouping of messages (on the same broker)
+- multiple partitions make up a **topic**
+
+1. Default -> key is hashed and we get a partition
+- ensures all events with the same key get to the same partition, **as long as the number of partition stays the same**
+- can lead to hotspots based on our keys = same problem as partitioning by key
+- should not be a problem if the keys are chosen randomly + no particular key is much hotter than the rest
+
+2. Round-robin -> messages get assigned to partitions in a round-robin fashion
+- we lose any ordering guarantees between messages with the same key
+- we get an even load distribution between partitions => even consumer workload
+
+### Partition replication
+
+- each partition has a partition leader
+- it is responsible for all interactions (read/write) with the partion
+- the partiton is replicated to other brokers for durability
+    - another broker can be promoted as a partition leader if the current one goes down
+    - the synchronous replication factor can be configured => kafka only returns success once it has persisted it to N instances
+
+### Consumers
+
+- each partition is assigned to a single consumer => a group cannot scale to more than the partition #
+
+![Kafka consumer assignment](https://raw.githubusercontent.com/strosu/learning-notes/master/notes/images_blocks/kafka_consumers.png)
+
+- we scale the consumers by grouping them in a consumer group
+- each event is delivered "once" to each group, to one of the consumers in it
+- multiple groups each receive the event "once"
+
+### Brokers
+
+- individual servers (physical or virtual)
+- both store information and serve requests
+- each hosts a number of **partitions**
+
+- a subset of the brokers are designated as controllers
+    - consensus protocol between the controllers
+- these handle the metadata storage, partition assignment etc
+
+### Publishing flow
+
+- if a key is specified, hash it to determine the partition to which it belongs
+    - otherwise, assign to random / round-robin partition
+- determine to which broker the partition is assigned to (via the controllers)
+    - we are actually looking for the **partition leader**, which handles all interactions with the replica
+- write to broker
+
+Messages are stored in an appen-only log file. This has some important properties:
+
+- messages are only appended at the end of the file
+- no editing / deleting => messages are immutable
+- each partition is represented via its own log file
+
+### Scalability
+
+- messages should ideally be small
+    - if needed, they can reference larger objects (e.g. stored in S3)
+- 1 broker instance can store 1TB of data and handle 10k requests / sec
+- we can scale horizontally by adding more brokers
+    - however, we need to make sure the topics have enough partitions to have them distributed to the new brokers
+    - if a topic has a single partition, it cannot live across different brokers
+
+- we distributed messages across partitions by chosing a different partition key
+- too many messages with the same partition key => hotspots / uneven load on the brokers
+
+Hot spot avoidance:
+
+- random distribution of messages
+    - if we don't need ordering guarantees, we can leave the distribution to Kafka
+
+- refine the key
+    - we can add a suffix to it, e.g. _1, _2 etc => we need to aggregate the results somehow
+    - we can further divide it by other dimensions, e.g. geographically => key_eu, key_us
+        - useful if we don't need to aggregate over the different sub-partitions
+
+
+
+
 
 ## Redis Pub/Sub
 

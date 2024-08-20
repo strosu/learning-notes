@@ -1677,7 +1677,6 @@ Consistency models:
 - When there are multiple generators (e.g. due to multiple leaders or partitioning), various approaches that boil down to spliting the ranges:
   - each generator has its own disjunct set of Ids
   - we get an ordering guarantee within that set, but not across them
-  - 
   - simiarly to Kafka and the ordering guarantees within a single partition, but not across them
 
 ### Laport timestamps

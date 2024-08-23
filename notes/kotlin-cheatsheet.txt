@@ -19,10 +19,15 @@ queue.add(node)
 queue.remove()
 queue.peek()
 
+reversed queue:
+val reversed = PriorityQueue<Int>(compareByDescending { it })
 
 STRINGS:
 
 val x = word.toCharArray().sorted().joinToString("")
+val x = StringBuilder()
+x.append("b")
+x.deleteAt(index)
 
 
 RANDOM:

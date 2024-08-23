@@ -197,7 +197,7 @@ Should be the go-to for:
 - event sourcing
 - fanning out, i.e. an event being consumed by multiple services
 
-### Properties:
+### Properties
 
 - durable, ensures no messages are lost (via replication)
 - scales by adding more instances
@@ -258,12 +258,38 @@ Should be the go-to for:
 - determine to which broker the partition is assigned to (via the controllers)
     - we are actually looking for the **partition leader**, which handles all interactions with the replica
 - write to broker
+- brioker replicates the write to N replicas, where N is the replication factor
+    - all the replicas are there just for backup purposes, they don't serve traffic
 
 Messages are stored in an appen-only log file. This has some important properties:
 
 - messages are only appended at the end of the file
 - no editing / deleting => messages are immutable
 - each partition is represented via its own log file
+
+### Consuming flow
+
+- partitions are assigned to consumers based on their consumer group
+- when asking for records from a topic, the consumer will get a batch of them, for its relevant partitions
+    - the coordinator keeps track of individual consumers offsets
+- when done processing, the consumer sends back an **ack** message with the highest read offset
+    - for the next pull operation, the server will only send messages starting with the ack'ed offset
+
+- !!!important to publish the ack at the right time, i.e. when we're sure our work is done
+    - our consumer can fail right after sending the ack
+- incentive to pubish later => more work for the consumer => more work to redo if it fails
+    - thus, we might want to split the work into multiple phases
+
+Parallelism is best achieved by having more partitions.
+- this allows us to have consumer groups with multiple parallel consumers
+- each has its own offset, and is managed by Kafka
+- using multithreading within a single consumer will mess up the offsets we report back
+    - we ack only the latest offset, not a list
+
+- the consumer might also keep a list of the last polled offset
+- in this case, it will just ask the server for messages starting with an offset, i.e. it will override the defaul behavior
+
+![Kafka partition assignment](https://raw.githubusercontent.com/strosu/learning-notes/master/notes/images_blocks/kafka-partitions.png)
 
 ### Scalability
 
@@ -288,7 +314,82 @@ Hot spot avoidance:
         - useful if we don't need to aggregate over the different sub-partitions
 
 
+- scalability makes sense **in the context of a topic**
+    - different topics are used for different workflows, so they have different scaling requirements
 
+### Fault tolerance
+
+- each partition is replicated to multiple brokers
+    - writes are persisted to N replicas before returning (synchronous replication)
+    - all traffic served from the leader (thus guaranteeing linearizability)
+
+1. Broker failure
+- the coordinator has to promote another broker to be the leader for that partition
+- based on the configuration, it can pick any, or just one that has the latest data sync'ed
+- a good practice would be to have the **acks** setting to more than 1. Thus we should always have another broker to fall back to in case of leader failure
+    - setting **acks=all** would represent the lowest risk of getting an out-of-date broker => max durability
+
+
+2. Consumer failure
+
+- when a consumer fails, its partitions need to be redistributed to the other ones in the same group
+    - should ideally use consistent hashing, so we don't need to rebalance other partitions already assigned to healthy consumers
+- consumers from the same group will continue from the last ack'ed offset (stored by the coordinator)
+
+
+### Message retries
+
+Kafka does not support retries, as it's not a queue. 
+- a message queue does not care about how the messages are consumed
+- should avoid republishing a message that we failed to process. 
+
+**SQS** is better suited if we want retries, DLQs etc. 
+- we can emulate it by creating a retry / dlq topic, but it's not very efficient
+
+### Idempotency
+
+1. On the producer side:
+
+- producers have built-in retries if they don't get a confirmation from Kafka
+- can be configured to be idempotent:
+    - each producer has an ID and assigns each message a numeric ID (monotonioiusly increasing)
+    - the server takes care of deduplication
+
+2. On the consumer side:
+
+- need to consider when the consumer is configured to ack
+    - can be as soon as the message is received, and not after it's processed
+- best practice is to let the consumers deduplicate messages
+    - can be done via a messageId
+
+
+### Performance considerations
+
+1. Batching
+
+- we can cache writes on the producer and send them in a batch
+- can configure it with a time / size cutoff
+    - trades performance for a chance of losing the writes
+
+
+2. Compression
+
+- uses Kafka's built in mechanisms
+    - makes the messages smaller => more throughput
+
+- can also consider enconding the messages (e.g. via Avro)
+    - more space efficient than JSON
+    - producer and consumer need to agree on schemas and versions of it
+
+
+### Retention policies
+
+- can be configured at an age, or disk space level
+- both can be increased, but larger log sizes will degrade performance
+- default is 7 days
+
+- can also enable compaction => only the latest value for a messageId is kept
+    - same as LSM trees
 
 
 ## Redis Pub/Sub

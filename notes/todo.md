@@ -2,7 +2,7 @@ Design:
 
 1. Finish reading building blocks - https://www.hellointerview.com/learn/system-design/in-a-hurry/key-technologies
 2. Deepdives:
-    a. Kafka
+    a. Kafka - OK, needs cards
     b. DynamoDB
     c. Redis
 

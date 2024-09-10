@@ -520,7 +520,7 @@ Non-functional:
 - messages should not be stored longer than necessary
 - security / spam prevention / content analysis
 
-# Basic design
+## Basic design
 
 - we can identify a 1-1 chat as a case of a group chat with 2 participants
 - the whole system can be seen as delivering messages from a user to a group, and from the group to its users
@@ -529,14 +529,154 @@ The communication between the client and server is bi-directional. Thus, we can 
 
 Types of messages the client initiate:
 
-- createChat
-- modifyParticipants
+- createChat(participants: List<String>, name: String) -> chatId: String
+- modifyParticipants(chatId: String, name: String, operation: Add/Remove): Success/Fail
 
-- sendMessage
+- sendMessage(chatId: String, message: String, attachments: List): Success/Fail
 - addAttachment
-- ackMessage
+- ackMessage(messageId: String)
 
 Types of messages the server initiates:
 
 - newMessageReceived
 - chatParticipantsUpdated
+
+
+### Attachments
+
+- the servers should not be handing attachments themselves, as they would just be a proxy for S3 anyway
+- instead, when at attachment request is received, get a pre-signed URL from S3
+- pass the presigned URL to the client, so they can upload directly
+  - if we want to support large files, we need to do a multi-part upload
+  - this introduces the overehead of cleaning up the incomplete attachments
+
+## Models
+
+We need to persist information about:
+
+- users
+  - metadata: slowly changing, e.g. name, photo, phone number etc
+  - status, if needed. We might want to separate it from the rest of the information, as it's access patterns are different (and this is much more lightweight)
+- chats: mapping of what users belong to which chat
+- messages themselves
+  - this is the message content itself
+  - additionally, links to attachments stored in blob storage
+- deliveries
+  - tuple of (message, client) that needs to be delievered
+  - keeps track of when a message is delivered to all the participants, so we can delete it
+
+![Whatsapp](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/whatsapp-redis.jpeg)
+
+## Deep dives
+
+### Scaling 
+
+Chat server:
+- the only stateful component is the chat server
+- we cannot work around this limitation, as a websocket needs a persistent TCP connection
+- when a client connects, the request gets routed to a chat server (RoundRobin, or based on load -> delegated to the load balancer)
+
+- assuming 1M connections per server, we need hundreds to be able to scale 
+- we can add more servers to support more concurrent users
+
+- when a client connects, the server subscribes to pub/sub channel for that user
+  - we need Redis to keep a connection open to all the chat servers, but the servers themselves don't need to know about each other
+- when the websocket connection times out / we don't receive heartbeats, unsubscribe 
+
+### Resilience
+
+- Redis should be running in clustered mode, for scalability and resilience purposes
+- the pub/sub channels get sharded across multiple instances, allowing it to scale
+  - we might need to add more redis instances if needed, but we can scale horizontally as much as we want / can afford
+
+
+## Logging in
+
+User logs in:
+   1. it sends a known offset for each conversation it is part of
+   2. the persistence service queries the conversations table for each of them
+      1. our partition key should be the tuple of (chat_id, timestamp / offset)
+      2. the sort key offers a natural ordering of messages in a conversation
+      3. we do a range query for all entries with a particular partition key (the conversation_id), and an offset / timestamp higher than the one the client already knows about
+   3. it returns a list of messages
+   4. client applies the changes and acks them
+   5. The events table also gets updated, since the messages have now been delivered
+
+User connects to the chat server:
+
+1. The LB creates a persistent websocket connection between the client and the webserver (with it acting as an L4 LB)
+2. the chat server subscribes to the pub/sub channel for that user
+3. any follow up messages are pushed from the chat server to the client
+
+## Sending a message
+
+1. User is already connected to a chat server
+2. The client pushes a message via the websocket
+3. The chat server persists the message to durable storage
+   - This can be an SQS queue, so it's not directly coupled with the persistence servers
+   - sending a message can be done asynchronously, but other operations might not be so straighforward (e.g. adding a participant)
+4. The persistence servers can scale independently. They read from the SQS queue and do the following:
+     - determine to which participants the message has to be delivered
+     - create events for each of them
+     - publish a message to Redis for each user that has to get a notification
+   
+
+# Chapter 13 - Top K searches
+
+## Basic design
+
+Conceptually, we need to be able to answer a query of "given a preffix, what are the most likely K words searched for?"
+
+- We store a map of search term - count.
+- when a request comes in, we need to find the subset of search terms that match it
+- out of the subset, pick the top K 
+
+
+- if we operate on preffixes, a trie is an ideal sollution, as we're constantly narrowing down the scope
+- to conclude, an up-to-date trie should be able to offer us the responses very quickly
+
+Access patterns:
+
+- we perform one write, when the user actually presses Enter
+- we need to offer multiple intermediate results, potentially with every keystroke. **we might want to send out the requests every interval, e.g. 50ms**
+
+- the system will be heavily skewed towards reads, so we should optimize them over writes
+
+## Querying
+
+- the leaf nodes will be at varying depths in the trie 
+  - thus, we need to search all the children nodes of the current preffix, so we can find the top k
+
+- we can precompute some of the results and store them in the intermediary nodes
+  - e.g. for T, we store Twitter and Twitch
+- downside is that we require multiple updates for each write
+  - we don't just need to increment the counter for the node, but also see if its ancestors are still up to date
+
+![Autocomplete trie](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/autocomplete-trie.jpeg)
+
+## Storing the data
+
+- the advantage of a trie is that we can also see its children
+  - this might not be too useful, if we also store the data in intermediary nodes
+- alternatively, we can flatten the trie into a key-value map
+  - we're mapping each preffix to a list of most used for queries
+  - for each read operation, we don't need to traverse the tree, instead we do an O(1) to get the value
+
+![Autocomplete trie](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/flattened-trie.jpeg)
+
+## Updating the data
+
+- assuming a large enough scale, we don't want to count every single request
+- instead, we can use **sampling**, i.e. we look at 1 of N requests
+
+## Populating the trie
+
+- we need to process a stream of incoming requests:
+  - when a user executes the query, have a chance of 1 / N to persist the sample to a kafka topic
+  - we need a large amount of consumers, to accomodate processing a large amount of logs in parallel => we need a high number of partitions (thousands? depends on how many writes per second a consumer can handle)
+- consumers read events from the kafka partitions and update the relevant rows in dynamoDB
+  - this should also update all previous preffix rows, so we need to limit the max depth of our "trie"
+- dynamoDB handles the partitioning, we don't need to worry about figuring out which instance holds which data
+- as a paranthesis, we should aim to keep our values in the table below one RU/WU from dynamo (1kb)
+
+![Overall design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/autocomplete-overall.jpeg)

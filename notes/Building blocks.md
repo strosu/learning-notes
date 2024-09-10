@@ -391,6 +391,46 @@ Kafka does not support retries, as it's not a queue.
 - can also enable compaction => only the latest value for a messageId is kept
     - same as LSM trees
 
+## Redis
+
+Properties:
+
+- in memory store (although some derivates might offer durability guarantees)
+- can be considered to not be very durable
+- very highly performant
+- each server is single threaded => serializable and linearizable operations
+
+- all data is stored in keys (values, complex objects etc)
+  - in effect, the key is the primary key that uniquely identifies an item
+
+### Setups
+
+Has different behavior in terms of replication / partitioning, based on configuration.
+**Considerents**:
+- all data for a request has to be on a single node
+- we should hit the right node directly, not rely on being redirected
+
+
+
+1. Single node
+   
+- single point of failure
+- should never use outside of test environments
+- one node that handles all read/write operations
+  - no partitioning
+  - no replication
+
+2. Replicated
+   
+- introduces the idea of replication between a leader and several followers
+- single leader replication
+  - a channel is maintaned between the leader and a follower
+  - the leader continuously pushes updates
+
+
+1. Cluster
+
+
 
 ## Redis Pub/Sub
 

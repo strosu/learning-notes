@@ -428,7 +428,7 @@ Has different behavior in terms of replication / partitioning, based on configur
   - the leader continuously pushes updates
 
 
-1. Cluster
+3. Cluster
 
 
 
@@ -442,14 +442,19 @@ Properties:
 - the only peristed information is the list of subscribers to each channel
 - messages are not persisted, so no overhead
     - thus, AT-MOST ONCE
+    - messages are only delievered to the consumers that are connected when the message is received by Redis
 - messages are delivered in the order in which they were received
 
 
 Flow:
 
-- create a channel A
-- user B sends a request to subscribe to channel A
-- when a message is pushed to channel A, redis will notify user B
+- consumer A sends a request to subscribe to channel X
+- consumer B sends a request to subscribe to channel X
+- consumer C publishes on channel X
+    - A and B are notified of the message and channel on which it was pushed
+
+- while subscribed, the clients consuming cannot be used for any other purpose
+    - we'll need separate clients if we also want to publish
 
 
 ## Redis sorted sets

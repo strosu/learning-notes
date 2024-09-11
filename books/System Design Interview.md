@@ -680,3 +680,140 @@ Access patterns:
 - as a paranthesis, we should aim to keep our values in the table below one RU/WU from dynamo (1kb)
 
 ![Overall design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/autocomplete-overall.jpeg)
+
+
+# Chapter 14 - Youtube
+
+## Requirements
+
+- users should be able to upload a file (large size)
+  - we should support upload pausing / resuming
+- users should be able to play a video
+
+- multiple clients should be supported => multiple encodings of the same file
+- clients have different netework bandwidths => multiple quality versions of the same file
+
+
+Non-functional:
+
+- system should be highly available
+- minimize the time needed between the upload and the video being available (e.g. X mins)
+- system should support a high throughput (millions of videos per day uploaded, 100s of Ms of views)
+- video playback should be smooth, even in low bandwidth environments
+- minimize infrastructure costs
+
+User locality: international, distributed across several markets
+
+## Entities
+
+User
+- some basic information about the user
+- profile picture etc
+
+Video
+VideoMetadata
+
+## Video related concepts
+
+1. Codec
+  - represents the encoding of the video, so it has a small size
+  - e.g. H.264
+
+2. Container
+  - represents the storing of the video
+  - codec + some metadata
+  - e.g. MP4
+
+3. Metadata files
+  - contain information about the different tracks
+  - contain information about different bitrates
+  - can map (format, offset, quality) -> encoded video chunk
+  - the client can decide which chunk to get next (requires some logic on the client side)
+
+## Uploading a video
+
+![Overall design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/youtube-initial-upload.png)
+
+- as we want to provide a smooth experience, we can use **adaptive bitrate**
+  - this will mix and match the video segments of different quality / bitrate, based on the client's network
+
+Video processing service:
+
+- gets notified a video has been uploaded the S3 by the client
+- breaks it into segments, a few seconds each
+- each segment is then converted / encoded to different qualities
+  - segments are stored in S3
+  - we update the metadata for the orginal video, to also include a map of (video, offset/segment/quality) -> S3 url
+
+- this kind of work will be mostly CPU-bound, as it's computationally intensive
+  - thus, we want to parallelize as it as much as possible
+
+- different worker pools for different tasks
+- shared-nothing between segments => the orchestrator can drop a request for each to be processed in parallel
+- if a step is based on a previous one, we need to chain up queues / workers
+  - when step A is finished, just drop a message to do B in their respective worker queue
+  - the intermediate segments are also saved in S3
+
+- if a processing step fails, don't mark the message in the SQS queue as processed
+  - it will get picked up again by another worker, providing a retry mechanism
+  - if we decide it's an irrecoverable failure:
+    - terminate the process
+    - remove temporary pieces
+
+- each step / step chain will update the cache for the processing
+  - the orchestrator regularly checks if all the works is finished (this can also be a separate role)
+
+- when all the steps have finished:
+  - update the metadata DB with the correct information for the video
+- if the process fails / cannot be finished, remove the intermediate segments from S3 and from the cache
+
+![With parallel processing](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/youtube-with-dag.png)
+
+
+## Viewing a video
+
+- not all videos will have the same number of views
+- 80/20 principle, apply recursively -> 64% of views will be towards 4% of the videos
+- we add a CDN layer on top of S3, and cache the frequently viewed files
+- accessing video metadata is a frequent operation too, so we need to add a caching layer here as well
+
+- the client will get the file metadata first, resulting in a map of (segment / quality) -> s3 url
+- based on the type, performance etc. of the client, it decides which rate to use
+- retrieves the segment from a cdn / s3 and plays it
+
+## Multipart uploads
+
+- the client breaks the file into chunks
+- it posts the list of chunks to the API
+  - API persists it to the metadata entry, with a status of Created
+- the client starts uploading pieces to S3
+  - when a piece is uploaded, have S3 trigger a function to upload the metadata entry for that chunk and mark it as Done
+
+- if the upload is interrupted, the client can query the server and get a list of chunks that are not yet uploaded
+- the process resumes
+
+## Other discussion points
+
+### Speeding up the processing
+
+- we can start processing the video segments as soon as a user uploads them
+- the S3 trigger can also drop a message for the orchestrator, which will pick it up from there
+- there will inevitably be cases when we're left with incomplete uploads
+  - set up an upper timebound until we consider it to be abandoned -> this will also reflect in the max amount of time for which an upload is resumable
+
+
+### Resuming a video view
+
+- we need to introduce another concept, e.g. a session
+- this can keep track of the user requesting the video, and the last segment it has viewed
+- the client needs to keep pushing this to the server every few seconds
+  - we need a persistent connection here
+  - we might not care about the precise granularity, i.e. have the client send their offset every 5-10 seconds
+
+- will add significant traffic
+  - might want to look at having a separate service whose sole job would be to track this / update the cache
+  - the client can query this service and handle the resuming on its own 
+    - it would know the list of segments, as well as the last one
+
+
+![Final design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/youtube-final.png)

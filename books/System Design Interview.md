@@ -681,6 +681,21 @@ Access patterns:
 
 ![Overall design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/autocomplete-overall.jpeg)
 
+## Other discussion points
+
+- as the input is taken directly from the users, we might need to support Unicode characters
+  - this will have an impact on the size of our trie, as it significantly expands the number of nodes we need to keep track of
+
+- multiple top-k sets of results
+  - the searches are very coupled with the users' language
+  - with the current implementation, we represent the top-k searches for a single language
+  - we might want to have multiple tries, one for each language we support
+
+- different weights for different searches
+  - in the current setup, we assign equal importance to a search from 10 years ago, as to one from today
+  - we might want to prioritize more recent searches, as those are more likely more relevant
+  - in the current system, we never purge the data
+
 
 # Chapter 14 - Youtube
 
@@ -817,3 +832,274 @@ Video processing service:
 
 
 ![Final design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/youtube-final.png)
+
+
+# Chapter 14 - Dropbox
+
+## Requirements
+
+1. Functional
+
+- able to upload a file
+- the file should sync to all the devices for that user
+- able to download the file to any device
+- able to see / download files shared with them by other users
+- file versioning
+
+2. Non-functional
+
+- highly available
+- should support high throughput
+- should support large files (GB size)
+- upload and download should be as fast as possible
+- files should be secured during transport and storage
+
+## Entities
+
+1. File
+2. FileMetadata
+3. User
+
+## Api
+
+- NOTE: All API requests should be authenticated via a JWT in the header
+
+- POST
+  - prepareUpload(metadata: FileMetadata) -> uploadUrl
+  - upload(uploadUrl) -> actually against the bucket storage
+- GET
+  - getFile(fileId) -> File and FileMetadata
+- POST
+  - shareFile(userSet: List<UserId>)
+
+## Basic design
+
+![Basic dropbox design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/dropbox-basic.jpg)
+
+### Upload path
+
+- user notifies the server it wants to start a file upload (and sends the metadata)
+- the upload server:
+  - saves the metadata
+  - gets a pre-signed URL from S3
+  - returns the pre-signed URL to the client
+- the client chunks the file and uploads them to S3
+- when the upload is finished, trigger a completion against the multi-part file
+- a lambda function notifies the upload server, who then updates the metadata to reflect the file has been uploaded
+- the server can optionally push a notification towards the other clients so they keep the file in sync
+
+### Download path
+
+- user requests a download URL from the server
+  - the file should be replicated across different S3 regions for durability / performance reasons
+  - we can also cache the file in a CDN, although the read / write ratio is not ideal for this usage
+- the server checks if the user has permissions to access that file
+- the user returns a URL, either an S3 or a CND one
+
+### Share a file path
+
+- user that owns the file sends a request to grant access to user A to file B
+- we store this information in a dynamo table where A is the partition key and B is a sort key
+- when checking if a user has permissions, we simply do a point query for (A, B)
+  - if we get a result, means the user has permissions
+  - no results means no allowed
+- we can also easily check what files a user has permissions to by doing a range query via the partition key for user A
+
+### File changes
+
+- since our file is composed of segments, the client should be able to deduce which ones changed
+- we upload only the diffs between the initial file and its new version
+- for each version, we store the metadata
+  - this will most likely be a mix of chunks from the current version (changed), as well as older ones (not changed)
+  - we treat the chunks like a heap file, and just reference them from the metadata
+
+How do we expire versions?
+  - we need to define how many versions we store (e.g. last N)
+  - we shouldn't save on every single change, instead batch these changes when pushing to the server
+  - once a version is above the expiry threshold, remove it, as well as any unreferenced chunks
+
+## Deep dives
+
+### Handling large files
+
+Since we need to support files up to 10GB or more, we cannot use a single request to upload the entire file.
+Drawbacks:
+  - timeouts on the server / client side
+  - network interruptions -> we have to start all over again
+  - sequential upload is slow
+
+Solution: 
+- break the file into multiple parts
+  - requires a "smarter" client
+- each part can be indepentely uploaded (in parallel)
+- we can pause / resume uploads by keeping track of which chunks have already been received by the server
+  - the metadata file can keep more verbose information
+  - instead of created / uploaded, we keep a list of chunks and the status for each of them
+  - when the blob storage finishes processing one chunk, it notifies us and we mark it as completed
+  - resuming implies querying for the metadata, and seeing which chunks have finished uploading
+
+If we want to support multiple versions / users editing the files after the upload:
+
+- we cannot rely on S3 to handle this for us automatically
+- emulating the behavior would work:
+  - the file is split into pieces from the start
+  - each piece is an independent S3 file (not part of a multi-part)
+  - the client uploads all of them at the start, with metadata being kept in sync
+- when an edit is made, identify which segment(s) changed
+  - push metadata information about the new version
+  - references all non-changed parts
+  - upload the changed parts
+
+- we can keep a map of (segment, oldest version referencing it)
+  - this gets updated on every edit, unless the current version has changed that segment
+  - when we expire a file version, check for all segments that have its key (use a GSI)
+
+### Performance
+
+- we upload as much of the file in parallel as the client's bandwidth allows 
+  - since the chunks are indepent of each other, they can be processed fully in parllel (and this scales horizontally)
+- since the bandwidth is probably the bottleneck, we can try and reduce our usage:
+  - each chunk is compressed before sending
+  - we can also store a compressed version in S3 once the file upload completes
+  - the client will then receive a compressed file, that it needs to decompress
+- compression efficiency varies greatly based on the type / content of the file
+  - use some heuristics to determine if the computational effort to compress the file is worth it
+
+### Security
+
+Encryption in transit:
+- https provides it for the communcation between client and server
+
+Encryption at rest:
+- S3 provides encryption by default for all the files that it stores
+  - getting the file won't be sufficient without the decryption key
+
+Access control:
+- when a user requests a file, we check if they have access to it
+  - this is done via the permissions table (check for (userA, fileB) exists)
+  - if the user has permissions, we generate a pre-signed URL 
+  - the URL should be expiring, with an agressive timer (e.g. 5 minutes)
+
+### Performance
+
+- all our services are stateless, so they can scale horizontally without any problems
+- we can consider S3 to be "infinitely" scalable, so storing the files there should be fine
+- cost-wise, we might want to look at offloading some of our less used files into cold storage for cost reduction purposes
+  - the read-write ration is about a 1:1
+
+### File update conflicts
+
+- if multiple users have write permissions to the same file, we might run into concurrent updates
+
+Problems:
+  - we have no clear way of differentiating which update should take precedence
+  - merging the updates makes little sense
+
+Solution:
+  - we store both versions of the file and let the users sort it out
+  - could three way merge be used to solve the problem? It still requires user interaction for conflict resolution
+
+
+![Dropbox detailed design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/dropbox-detailed.jpg)
+
+
+# Part 2 - Chapter 1 - Proximity service
+
+Used to discover nearby points of interests (restaurants etc)
+
+The points of interest are static, so this would not fit a "find my friends" scenario.
+
+## Requirements
+
+Three main operations:
+- add a point of interest
+- get nearby points of interest
+  - should support multiple radii
+- see point of interest details
+
+## Entities
+
+1. PointOfInterest
+2. PointOfInterestDetails
+
+## APIs
+
+- getLocations(latitude: Double, longitude: Double): PointOfInterestPage[]
+  - we might have a lot of points in the radius, use pagination (return total, current offset)
+- getDetails(pointOfInterestId: String): PointOfInterestDetails
+- addPointOfInterest(details: PointOfInterestDetails): Id(String)
+
+## Basic design
+
+![Proximity basic design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/proximity-initial.jpg)
+
+### Add / edit a business
+
+- client calls the dedicated business service
+- the business service persists the business metadata into a DB / cache
+- the business service returns a pre-signed URL for the client to upload any larger files to blob storage (images etc)
+- once the upload completes (if needed), mark the point of intersest as complete
+
+### Get business details
+
+- client calls the business service for an ID
+- business service gets the information from the cache, if present
+  - otherwise, read from DB and refresh the cache
+- client pulls the large objects directly from the CDN
+  - we can speed things up by keeping the business information in the CDN alltogether (with a TTL)
+  - the information is a good candidate, since it changes infrequently
+  - it would distribute the information closer to our customers
+  - cost has to be balanced, i.e. it would depend on how much it costs
+  
+### Find nearby businesses
+
+- client calls the dedicated proximity service
+- service queries the DB to find nearby points 
+  - since our read / write ratio is high, we can use a single leader replication
+  - we can have multiple read replicas, with a tradeoff for consistency (C > A)
+  - normally we should be fine with having a small delay between the business being added and it being return in the queries
+
+## Deep dives
+
+### Geo spatial indexing
+
+- Redis and Postgres both support it off the shelf
+- we should be able to explain how an algorithm would work
+- several approaches:
+  - Geohash (simplest)
+  - Qhadtrees
+  - Uber's H3
+  
+### Geohash
+
+- the world map (square projection) is recursively divided in the quarters
+  - two bits are sufficient to represent all 4 different divisions
+- at each step, we divide the current square into 4 and append the sufix
+
+
+![Geohash](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/geohash.jpg)
+
+- to find a more accurate area, we simply expand the number of steps needed
+
+![Geohash length and areas](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/geohash.jpg)
+
+- based on the center and the radius of the search, we find the corresponding squares we need to search for
+  - this is an O(1) operation
+  - we need to also return adjacent geohashes. Worst case scenario is for the hashes to have no share prefix (across the initial split lines)
+
+  - if we know which area has which points of interest, we can answer the query
+  - thus, we need to store a mapping between a geohash and its points of interest
+  - we are interested in storing a business for a particular length range (e.g. we don't want to store it for a square of 1000 km or 10cm)
+
+- when a business is added, we compute the list of geohashes that are relevant for it (up and down the granularity)
+- we store it in our store (with the geohash as the partition key)
+- we also upload the location cache
+
+### Scaling
+
+- determine if we need to shard the geoindexing information
+  - probably not, as it scales with the amount of businesses, not of geohashes
+  - we still need multiple replicas, to work around other bottlenecks (CPU, network)
+
+
+![Proximity basic design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/proximity-final.jpg)

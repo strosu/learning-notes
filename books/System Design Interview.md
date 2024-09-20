@@ -1101,5 +1101,347 @@ Three main operations:
   - probably not, as it scales with the amount of businesses, not of geohashes
   - we still need multiple replicas, to work around other bottlenecks (CPU, network)
 
+### Caching
+
+Good candidates are:
+
+1. The business details
+  - slow changing, read frequently
+  - cache mapping between businessId -> businessDetails
+
+2. The geohash index itself
+  - our repeated queries are "find all businesses in this geohash index"
+  - the DB stores one row for each mapping of (geohash, businessId), since it's easier to update
+  - the cache can store a map of (geohash, businessId[]) for faster retrieval
+  - when a new business is added, invalidate the cache for all its geohashes
+  - the cache will get populated on the next query (which is a range query based on the partition key against the table)
+
+### Improvements
+
+- not enough points of interest in the selected radius
+  - we can expand our search by finding a higher level geohash
+  - remove the last bit, which would roughly expand the area by 4x
+  - recurse until we're either too far, or enough points are found
+
+### Filtering based on business criteria
+
+- each geohash should return a relatively small amount of points of interest
+- since these are in memory, it should be ok to get the list and hydrate the details for each of them (the calls can be done in parallel)
+
 
 ![Proximity basic design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/proximity-final.jpg)
+
+
+# Part 2 - Uber
+
+## Requirements
+
+### Functional
+
+Users should be able to:
+
+- send a start and an end location and get a fare estimate
+- accept an estimate
+
+Riders should be able to:
+- accept / reject a request
+- get navigation instructions between A and B
+
+### Non-fuctional
+
+- matching should be fast (e.g. < 1min)
+- one driver assigned to one ride at one time
+  - strongly consistent around ride matching
+  - available everywhere else
+- system should be able to handle very high request peaks (e.g. 100K requests)
+
+## Basic design
+
+### Models
+
+Core entities:
+- Rider
+- Driver
+- Ride
+- Location
+  - we need to know nearby drivers to we can offer them rides
+
+### Api design
+
+- getEstimate(start, end) -> Ride
+- acceptEstimate(rideId) 
+
+Drivers:
+- updateLocation(current)
+- acceptRide(rideId) -> Location (for pickup)
+- updateRideStatus(rideId, status) -> Location (next checkpoint)
+
+![Uber basic design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/uber-basic.jpg)
+
+## Deep dives
+
+### Ensure we can handle the flow up location updates
+
+- estimated number of drivers: 5M
+- each driver would send a location update every 5s
+- 1M writes per second
+
+Additional observation: for the OLTP flow, we just care about the latest location information
+- we can use an in-memory store that would map the driver and its last updated location
+  - Redis is a good candidate, as we can also query for all points from a geohash based on the distance to the Rider
+  - we'll probably need more than 1 write instance, so a Redis cluster has to be configured
+
+Problems:
+- as long as the diver continues to send updates, we continuously refresh the data
+- when a driver stops sending updates, we need to invalidate the data point
+  - either have a separate sorted set and walk through it to invalidate
+  - or leave the data there, with no TTL
+    - the matching service also has to check the driver status in some other data source (this poses additional problems, as they might be out of sync)
+
+### Invalidating location data
+
+- a regular geohash does not allow expiring data
+- a sorted set however does
+- we can already think of our geohash as a map of (string -> list of drivers)
+
+We store one sorted set per geohash. If this is at a single granularity, each driver should be present in "one" of them.
+- the set name is the geohashId (for the fixed granularity)
+- the userId is the key
+- the timeStamp is the sorted key
+
+- we can regularly expire keys that are older than a particular score (since it's what we sort on)
+
+If we want to consider the map at different granularities:
+- each driver would be present in multiple geohashes, each with its own granularity
+  - we are probably talking about a few levels of depth, based on the spltting factor for the geohash (4 or more)
+
+Problems:
+- we now need to look at adjacent geohashes ourselves, rather than delegating this to Redis
+  - we need to compute the list ourselves, but this is an O(1)
+  - if our depth is constant (i.e. no expanding radiuses), we can pre-compute this and cache that list of neighbors for each of the hashes (might also work for variing radii, depends on how many levels we want)
+  
+### Ensure each driver is matched to a single ride
+
+- we need to make sure a ride is only offered to a single rider
+- this can be done by processing the list of riders in series (i.e. on the same thread)
+  - offer to one and wait
+  - if we don't hear back, offer to the next one
+- we need to make sure the dirver is not offered another ride by another instance 
+  - before offering the ride to a driver, acquire a short-lived distributed lock (Redis should work)
+  - there are certain edge cases with this approach:
+    - we acquire the lock
+    - the thread gets delayed
+    - the lock expires (and is acquired by another worker for another ride)
+    - the initial thread resumes execution and also offers the ride
+  - we might be able to live with having two push notifications, but we need to make sure the matching is done 1:1
+    - when the rider accepts the ride, we need an additional conditional check that is it currently not assigned
+    - ideally, we should be able to mark this in the DB somehow (fencing tokens)
+    - we might want to store a "ride-accepted counter" and do a conditional update, so we'd outsource the race condition check to the DB
+
+### Necessity of sending location updates at precise intervals
+
+- there's an uneven value in getting the location every X seconds for all drivers
+  - for someone going at high speed, we need more frequent updates
+  - for a driver that's parked, there's little value in getting it every 10s
+  - the client can take some inputs (e.g. speed, acceleration) and infer the frequency with which it should send updates
+  - this requires a "smarter" client, which we should have (as it's an app)
+
+
+### Scaling for high ride request
+
+- the ride service does not directly call the matching service
+- instead, it enqueues a message for it via an SQS queue
+  - this ensures message durability
+  - we return a success only after persisting to the queue
+  - at this point, we're promising we'll attempt to match it (although the process hasn't started yet)
+- a scaling set of workers reads from the queues and processes the items with a high degree of parallelism
+  - if a worker crashes halfway through, the enqueued item will be visible again after the visibility timeout (as it wasn't marked as finished)
+  - we will be processing items out of order, but that is fine, as the requests are indepent of each other
+
+### Scaling our system further
+
+- our service is highly partitionable based on locations (at a high level)
+- we can have separate deployments handling disjoin geographical areas (e.g. at a continent / country scale)
+  - we might also need to keep data local, so we do need separate deployments (e.g. for EU, China, etc.)
+
+![Uber final design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/uber-final.jpg)
+
+# Part 2 - Nearby friends
+
+## Requirements
+
+### Functional
+
+- users should be able to see which of their friends are nearby (with a configurable radius, up to a certain range)
+- users should not show up in the list if they are offline - list should be updated frequently (every few seconds)
+
+### Non-functional
+
+- lookups should be fast and accurate
+- we should support a high volume of updates / second
+- consitency over availability: we can afford to be eventually consistent
+- reliability: since we're regularly updating the location, we might be ok with missing some updates
+- location updates should also be persisted for analysis / ML purposes
+
+100M DAU -> 10% online at one time 
+- 10M updates every N seconds -> 1M location updates / sec
+- 10M refreshes every M seconds -> 1M reads for the nearby friends / sec
+
+## Basic design
+
+### Models
+
+User
+- userId
+- consentGiven
+- friendList[]
+- friendRange (configurable per user)
+
+Location
+- lat
+- long
+
+User Cache:
+
+- userId
+- Location
+- TTL
+
+### APIs
+
+- since we're constantly sending and receiving updates, http polling would be less suited than websockets
+- thus, we maintain a persistent (stateful) connection between each user and a websocket server
+
+### Approaches
+
+1. Keep a list of people online mapped to their corresponding geohash
+- every location update for a user would write to the corresponding geohash(es)
+
+When a request comes in:
+- find the nearby geohashes, based on the user / system configuration
+- intersect the list of friends with the list of people in close proximity
+  - since most of the user's friends will most likely not be online and close by, it would be inefficient
+
+- since we want the delay between "user gets nearby" and the client being aware of it, it would need to query often
+- on each iteration, we'd have to perform the computation
+
+Alternatively, we can:
+-  get their list of friends
+- for each friend, find their current location (if any)
+- compute the distance from that location to the currenet user
+- would also be wasteful, as it would result in hundreds of queries on every operation (read amplification)
+
+2. Notify a user only when one of their friends gets nearby
+
+- on start, the client asks for a list of online friends within the radius
+- this can be a longer running operation, as it's a one off
+  - we can use any of the approaches above (intersect geohash with list of friends for example)
+
+- when a user updates their location, fire a message to all interested parties
+- cache the value locally on the websocket server too
+  - this would can be consumed to determine if a notification should be sent to the user, based on the distance between it and the user
+
+**Setup**
+
+- A is friends with B and C
+- B is also friends with X and Y
+- all are online except A
+- B is near A / A is near B
+
+
+### Initial connection flow
+
+- A connects to a websocket server
+- publish a message on channel A with the location
+- update the Location Cache (with a TTL)
+
+- get the list of friends from the Friend DB (B and C)
+  - for each friend, subscribe to their pub-sub channels (B and C)
+
+- we need to provide an initial list of close friends
+  - for each friend, query the Location Cache
+  - for those that have a value, check the distance from A and include if close enough (say it's just B)
+
+### Recurring location update flow
+
+- C sends their location to their corresponding websocket server
+- the server caches the information locally
+- the server pushes the new location to channel C
+- the server updates the Location Cache and (optionally) updates the Historcal Location DB -> this can just be a Kafka event to be processed later (a-la Event Sourcing), or an actual write
+
+- A's websocket server is listening on channel C
+  - it receives a location update for user C
+    - it needs to know which to which users it should push this information
+    - what we need is a map between (channel, list of users to notify)
+    - in our case, this will be (channelC, A)
+
+  - it receives the update and checks the distance between A and C (using A's cached location)
+  - if the distance is short enough, update A with C's location
+
+The relationship between A and C is snapshotted when they log in.
+- the server needs to know to which users to foward the notification
+- instead, we need a separate mechanism to make sure adding / removing friends correctly reflects in the list of nearby users
+
+### Adding / removing a friend flow
+
+A unfriends B
+
+- A's websocket server already has a map between (channel B, A)
+- C's websocket server has a map between (channel A, B)
+
+- the API server needs to notify it to remove A from the list in the mapping
+  - since the server is listening for Cs notifications, the API server can also push a message to channel B
+    - this has to contain a type, and the edge B -> A
+  - we also send an inverse message, e.g. A -> B
+
+- when the websocket server gets this message, it removes for example A from the channel B list
+  - it should unsubscribe from channel B if the list is emptys
+  - otherwise, we still need to listen for channel B for potentially other friends (e.g. X / Y) 
+
+![Nearby friends design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/nearby-initial.jpg)
+
+## Scaling
+
+### Api servers -> horizontally scalable
+
+### Websocket servers 
+
+- horizontally scalable
+- the only stateful componenent
+  - when one disconnects, the load will immediatelly increase on all the others
+  - connections should be drained before simply removing the node
+
+### User DB
+
+- use dynamo, let it scale to the needed levels
+
+### Location cache
+
+- single Redis instance is probably not sufficient
+- use a Redis cluster, partition by userId -> should lead to an even distribution
+
+### Redis pub-sub
+
+- we need multiple instances to be able to handle a large number of channel
+- channels are independent of each other, so they can be evenly distributed across instances
+- we might need some orchestration on top of this, e.g. Zookeeper + consistent hashing
+  - each websocket server can cache a copy of the ring locally
+  - we also subscribe to updates
+  - when the server wants to publish to channel X, it consults the ring to figure out which Redis instance has it
+  - a similar approach is taken when subscribing
+
+When a redis pub-sub instance is added / removed:
+- no message data to be moved, as it's not persisted
+- some of the channels have to also move (i.e. the map between the channel and the subscribers)
+
+Flow:
+- redis instance leaves / joins
+- zookeeper notifies all subscribers
+- each subscriber sends an unsubscribe message to the old server (if it's still running)
+- they also send a subscribe message to the new one
+- this has to be done for each channel that is moved, so it will lead to a burst of requests
+
+- during failover, we will inevitably lose messages
+- since location is something that's frequently updated, this should be an ok tradeoff
+
+**Note** At this scale, we could have an abstraction layer over the Redis pub-sub, that should hide the fact that we are dealing with a cluster

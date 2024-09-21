@@ -1266,7 +1266,7 @@ Problems:
 
 ![Uber final design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/uber-final.jpg)
 
-# Part 2 - Nearby friends
+# Part 2 - Chapter 2 - Nearby friends
 
 ## Requirements
 
@@ -1445,3 +1445,137 @@ Flow:
 - since location is something that's frequently updated, this should be an ok tradeoff
 
 **Note** At this scale, we could have an abstraction layer over the Redis pub-sub, that should hide the fact that we are dealing with a cluster
+
+# Part 2 - Chapter 3 - Google maps
+
+## Requirements
+
+### Functional
+
+- users should be able to input a source and a destination and get driving instructions between them
+- we should see the user's location in near-real time
+- users should be able to see the map at different locations / zoom levels
+
+### Non-functional
+
+- navigation directions and estimates should be as accurate as possible
+- getting the map and updating it should be fast
+- the system should be available over consistent, i.e. we should be fine with outdated information over no availability
+- bandwith usage should be minimised
+
+## Basic design
+
+### Models
+
+User
+- id etc.
+
+UserLocation
+- userId
+- timeStamp
+- lat
+- long
+
+MapTile
+- id / geohash
+- downloadUrl
+
+NavigationPoint
+- lat
+- long
+- description
+
+### APIs
+
+batchUpdateLocation(Location[]) -> 200
+
+getDirections(source, destination) -> NavigationPoint[]
+
+getNearbyMapTiles(Location, granularityLevel) -> MapTile[]
+
+### Discussion points
+
+- the user inputs locations in human readable format, e.g. as an address
+  - we need a service that will map these to geohashes (via **geocoding**)
+
+- the navigation service needs to know the points in the graph, so it can calculate the shortest path
+  - we cannot process a graph containing all the points in the world, so it has to be broken down
+  - since we're already partitioning our space via geohashing, we can use a similar approach here
+
+- we partition the world into geohashes
+  - for each geohash, we store its corresponding maps image (compressed)
+  - for each geohash, we also need to map the graph of roads within in
+    - at different zoom levels, we keep different types of points and edges (e.g. country level should only show highways)
+  - we also map the connection points between adjacent geohashes
+  - NOTE: there will be very large parts of the world that are not inhabited / do not need to be mapped in detail. For those, do not go to deep zoom-wise
+
+![Maps basic design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/maps-basic.jpg)
+
+## Deep dives
+
+### Sending locations and persisting it
+
+- the number of writes will be very large
+- we want to minimize it -> we can batch the location updates from a single client
+  - at each interval, measure and store on the client
+  - at each update interval, send the locations to the server as a batch
+  - based on the conditions the client can detect (e.g. speed, acceleration), we can increase or reduce the frequency up measurement / updates
+  - little value in sending the same location update over and over again for a stopped driver
+- we need a DB that will handle a large write throughput
+  - the data will be used to feed the routing algorithm, ML, etc, but the read/write ratio will be small in our location DB
+  - Cassandra should be a good candidate, it can scale hozitonally
+    - what do we partition by?
+    - user should be a good candidate, leading to an even distribution
+    - the timestamp can be the sort key
+      - we can easily get the latest location for the user
+      - we can easily get a range of locations for a particular time range
+    - TODO: read more here - https://www.hellointerview.com/learn/system-design/deep-dives/cassandra
+
+Multiple services will consume the location update information
+  - we want to decouple the location service from the consumer 
+  - we can use a Kafka topic, with each different service getting the data straight from it
+  - we don't care too much about atomicity between the location DB and Kafka topic
+    - missing a notification in Kafka should be acceptable, as we get regular updates for each user
+
+### Getting the routing tiles
+
+- we need to transform real world map data into routing tiles
+- have a separate service that does this at regular intervals
+  - will introduce a delay between a map change and it reflecting in our routing
+  
+Routing tile structure:
+- graph, with the intersection locations being nodes, and the roads being edges
+- we need to persist this, i.e. for each node, store its adjacency list
+- when doing traversal, we need to load the entire graph for the routing tile
+  - storing individual nodes in a key/value store would be inefficient
+  - we can serialize the entire graph structure as a JSON and store it
+    - S3 is much better suited for blob storage, as all we're doing is writing and reading entire documents
+
+The distance between nodes takes into account not just the physical distance, but driving speed
+- it is a combination of static data (road graph), and driver information (e.g. speed to traverse the graph)
+- the routing tile update service will also ingest data from the Location service (can be done via a Kafka topic)
+
+![Maps detailed design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/maps-basic.jpg)
+
+### Getting ETAs
+
+- we are computing serveral routes for the user, based on static information (roads)
+- for each of these, we also know how long the traversal took (time-wise) for previous users
+  - we assign more weight towards more recent traversals + apply ML (e.g. rush-hour patterns)
+- the Traffic service consumes the flow of location data and assigns a traversal time to the different edges
+- this data is combined with the static information to provide an ETA
+
+- we can use a similar mechanism for providing alternative routes
+  - we can periodically compute the route for the users
+  - if we detect the road conditions have changed significantly since we computed the route, we can privide alternatives
+  - keeping the traversal duration information for each segment updated should be sufficient for some cases. 
+    - If there's an accident, we'll detect that users are taking more and more to traverse it
+    - other alternate routes might become faster than the current one
+  
+### Communication between users / server
+
+- the users are constantly pushing location data
+- the server might have some valid scenarios for initiating: route updates, ETA updates
+- websockets are a viable alternative in this case
+  - this introduces state to one of our services (the websocket service)
+  - since we have a large number of users, we need a Redis cluster -> more overhead

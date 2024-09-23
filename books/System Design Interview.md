@@ -1579,3 +1579,128 @@ The distance between nodes takes into account not just the physical distance, bu
 - websockets are a viable alternative in this case
   - this introduces state to one of our services (the websocket service)
   - since we have a large number of users, we need a Redis cluster -> more overhead
+
+
+# Part 2 - Chapter 6 - Ad click aggregator
+
+## Requirements
+
+### Functional
+
+- user clicks on an add and is redirected to another website
+- advertisers can query and get details on how many times an ad was clicked within a configurable interval (last M minutes)
+- retrieve top most clicked ads in the last M minutes
+  - support filtering
+
+### Non-functional
+
+- aggregates need to be correct 
+- a click should be included in the aggregate as soon as possible (a few minutes at most)
+- querying for aggregates should be fast
+- we should not be losing clicks / impressions
+- we should not be counting clicks multiple times
+  - robustness
+  - protect against malicious users
+
+## Basic design
+
+### Models
+
+Ad
+- id
+- redirectUrl
+- ...
+
+Impression
+- id
+- associatedAd
+- user
+- timestamp
+
+### APIs
+
+generateImpression() -> Impression
+clickAd(impressionId) -> 302, redirect to Url
+
+### Notes
+
+We are dealing with very different entities in our system, with different usage patterns. We store each of them in its own system
+
+- the ad information (slowly changing) -> dynamo
+- impressions (generated once per click) -> dynamo
+- raw click data (write heavy, very few reads) -> Cassandra
+- aggregate data -> OLAP system
+  
+![Analytics initial design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/analytics-initial.jpg)
+
+## Deep dives
+
+### Scale
+
+1. click registration service
+  - stateless, we can always add more machines
+
+2. The kafka topics for click processing
+  - we need enough partitions to allow sufficient parallelism within a consumer group
+  - we can't have more parallel consumers than partitions, so we can chose an initial number of partitons that is large enough
+  - determine the time needed to process a message for the consumers and configure Kafka based on that information
+  - the adId is a good partition key
+    - this will lead to all impressions for the same ad being sent to the same topic
+    - the aggregator doesn't need to correlate them across Kafka partitions
+  - we might have hot partitions, when an ad is particularly shown (e.g. a campaign)
+    - shard it further by appending a suffix (e.g. _1, _2).
+    - requires more complex logic for gathering the results
+
+3. Aggregate service
+  - this should be an off-the-shelf solution
+  - we'll most likely have a map-reduce kind of implementation
+  - this comes with natural horizontal scalability, as the aggregation jobs could be distributed to different machines (sincen they are not sharing anything)
+  - TODO - more on Spark (used at Uber)
+
+4. OLAP DB
+  - scales by adding more nodes
+  - shard by addId would be natural
+  - we can also shard by advertiserId => each advertiser querying would get all the information from a single partition
+
+### Reliability
+
+- we need to make sure every click is recorded
+- our components offer strong durability guarantees (e.g. Kafka)
+  - we configure it with a retention period that would allow us to reprocess events in cases of failures (e.g. a week)
+  - should a processor go down, the data is still persiste in Kafka and it can resume
+  - a kafka consume should only ack once its done processing
+    - this turns into an at-least-once situation, so we need additional deduplication (see the ImpressionId)
+  
+- events might come out of order, or significantly delayed 
+  - this will lead to them not being aggregated in the right place
+
+Steam processing:
+- offers real time aggregates
+- operates on an unbound stream
+
+Batch processing:
+- operates on a known set
+- the calculations are delayed by its nature (e.g. up to the wait time between executions)
+
+We can have best of both worlds:
+- use a steam processing to offer information as soon as possible
+- have the authoritative version be the batch processing
+  - as it can run at precise intervals, it can be tuned so it is more likely to catch delayed events
+  - e.g. if an event comes hours later, if we run our batch once per day, we'll most likely catch it
+- equivalent to reconciliation, but authoritative
+
+### Reduce duplication / fraud
+
+- before displaying the ad, the client requests an impressionId
+  - this corresponds to a unique display of the ad
+  - we will either have 0 or 1 click events for that impressionId
+
+- the click server needs to verify the integrity of the impressionId sent by the client
+  - if we don't recognise it, discard
+  - if it's already been seen (i.e. in our cache), don't add it to the Kafka stream
+
+### Offer low latency querying
+
+- we already expose aggregates in the OLAP DB
+- we should be able to creata **materialized views**, that will speed up the querying
+  - we sacrifice storage space for faster reads

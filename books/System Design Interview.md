@@ -1581,6 +1581,171 @@ The distance between nodes takes into account not just the physical distance, bu
   - since we have a large number of users, we need a Redis cluster -> more overhead
 
 
+# Others - Ticketmaster
+
+## Requirements
+
+### Functional
+
+- users should be able to view event details
+- users should be able to query for events with different parameters (venue, band, city etc)
+- users should be able to book tickets to events
+
+Others:
+- see booked concerts
+- a user with special roles should be able to add / modify events
+
+### Non-functional
+
+- the booking system should be consistent over available
+- other parts of the system should prioritise avaialabilty and performance over consistence
+- should support high throughput for all parts of the system
+- the system should support significantly more reads than writes
+
+Others:
+- privacy / GDPR
+- secure payment
+
+## Basic design
+
+- most of our operations are reads
+  - searching for concerts, seats etc
+- very few writes
+  - adding / updating the concert information
+  - booking tickets
+
+- we need to book each ticket just once
+  - this points to needing a DB that allows for transactions (either Dynamo or Postgres)
+
+### Models
+
+User
+- id
+..
+
+Band
+- id
+...
+
+Concert
+- id
+...
+
+Venue
+- id
+...
+
+Ticket
+- id
+- concertId
+- seat
+
+Booking
+- id
+- userId
+- ticketId
+- status
+
+### APIs
+
+- createConcert(ConcertInformation) -> OK
+- findConcerts(filter) -> Concert[]
+- bookSeat(concertId) -> Booking
+
+
+## Deep dives
+
+### Ticket reservation system
+
+- we need some form of concurrency control so that no two users book the same ticket twice
+- choice of optimistic vs pesmisstic concurrency control
+  - with optimistic, it would offer a bad customer experience, as they'd input the bank details etc, only to find out we need to everything back
+  - pesmisstic control (i.e. locks) seems more appropriate in this case
+  - we can do a DB lock (select for update), but that is bad since this is an interactive session
+  - dynamo wouldn't support it anyway
+
+- thus, we'll offer a different flow, in which a ticket can be "reserved" for a short duration
+  - we should not accept any other requests for that ticket while the lock is in place
+  - if the lock expires without the ticket being sold, put it back into the pool of available ones
+
+
+Flow:
+
+- user asks for a ticket
+- read status from dynamo
+  - if it's booked, fail operation => someone else got it first (tell user this is sold)
+- try to acquire a Redis lock with a TTL (e.g. 10 minutes)
+  - if it fails, fail operation => someone else has it (tell user it might be available soon)
+- when action completes, try to update the DB for the ticket
+  - we need some form of fencing tokens / conditional updates here (lock might have expired and maybe someone else already took the ticket)
+  - the ticket and the booking are updated within a single transaction
+  - the lock is released
+
+- the worst case is:
+  - user A acquires lock
+  - sends user A to Stripe
+  - lock expires
+  - user B acquires lock
+  - user B pays 
+  - ticket is marked as taken by user B
+  - user A pays
+  - process reacts to the payment, but it needs to refund it
+
+### Scaling
+
+Search service:
+  - the search service can scale horizontally to support all the traffic we need to serve
+
+Our other services are stateless so scaling horizontally works.
+- we need LBs in front of them, but a simple RR strategy is sufficient
+
+Scaling across geographies
+- we should be able to treat most events as independent (except for a tour for example)
+- we can shard our system, e.g. one deployment handles NA, another Europe etc
+
+### Keeping the available seat map up-to-date
+
+- for high volume events (e.g. Taylor Swift concerts), the map might be out of date by the time a user actually clicks on a seat to star the reservation process
+
+
+### Full-text search
+
+- Elastic would be an obvious choice
+  - could enable fuzzy searching, in addition to just indexing
+
+- since the amount of events we have is relatively small (not even millions), we can cache everything about them
+  - would 1KB be enough to store information about an event? How about 10KB?
+  - a single server would probably be enough, so we don't even need a Redis cluster
+  
+- it might be worth exploring our own indexing solution
+  - we keep all the events in memory and can query them directly
+  - this would combine caching + indexing, so Elastic might not even be needed here
+  - we'd need to scale out the servers
+
+- whichever option we chose, we'll be dealing with eventual consistency
+- additional overhead complexity
+
+### Caching query results
+
+- we can cache the results of our queries directly (e.g. in Redis)
+- difficult to keep the data in sync
+
+- alternatively, Elastic does offer some caching mechanism built in
+
+### Failure points
+
+- the redis master / one of the cluster nodes might fail
+  - multiple users might be able to acquire the same lock at the same time
+  - we proceeed, while relying on the DB to ensure just one gets through
+  - since we update the DB once we know for sure the user has paid, this can lead to a refund being required right away (in some rare cases)
+
+- we might fail to process the Stripe notification that the payment is successful
+  - money taken, but we didn't manage to update the ticket entry
+  - the lock will eventually expire and the ticket might be sold to someone else => need an alert for this scenario
+  - we also rely on Stripe's webhooks being retried etc
+
+
+
 # Part 2 - Chapter 6 - Ad click aggregator
 
 ## Requirements

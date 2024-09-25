@@ -1131,141 +1131,6 @@ Good candidates are:
 
 ![Proximity basic design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/proximity-final.jpg)
 
-
-# Part 2 - Uber
-
-## Requirements
-
-### Functional
-
-Users should be able to:
-
-- send a start and an end location and get a fare estimate
-- accept an estimate
-
-Riders should be able to:
-- accept / reject a request
-- get navigation instructions between A and B
-
-### Non-fuctional
-
-- matching should be fast (e.g. < 1min)
-- one driver assigned to one ride at one time
-  - strongly consistent around ride matching
-  - available everywhere else
-- system should be able to handle very high request peaks (e.g. 100K requests)
-
-## Basic design
-
-### Models
-
-Core entities:
-- Rider
-- Driver
-- Ride
-- Location
-  - we need to know nearby drivers to we can offer them rides
-
-### Api design
-
-- getEstimate(start, end) -> Ride
-- acceptEstimate(rideId) 
-
-Drivers:
-- updateLocation(current)
-- acceptRide(rideId) -> Location (for pickup)
-- updateRideStatus(rideId, status) -> Location (next checkpoint)
-
-![Uber basic design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/uber-basic.jpg)
-
-## Deep dives
-
-### Ensure we can handle the flow up location updates
-
-- estimated number of drivers: 5M
-- each driver would send a location update every 5s
-- 1M writes per second
-
-Additional observation: for the OLTP flow, we just care about the latest location information
-- we can use an in-memory store that would map the driver and its last updated location
-  - Redis is a good candidate, as we can also query for all points from a geohash based on the distance to the Rider
-  - we'll probably need more than 1 write instance, so a Redis cluster has to be configured
-
-Problems:
-- as long as the diver continues to send updates, we continuously refresh the data
-- when a driver stops sending updates, we need to invalidate the data point
-  - either have a separate sorted set and walk through it to invalidate
-  - or leave the data there, with no TTL
-    - the matching service also has to check the driver status in some other data source (this poses additional problems, as they might be out of sync)
-
-### Invalidating location data
-
-- a regular geohash does not allow expiring data
-- a sorted set however does
-- we can already think of our geohash as a map of (string -> list of drivers)
-
-We store one sorted set per geohash. If this is at a single granularity, each driver should be present in "one" of them.
-- the set name is the geohashId (for the fixed granularity)
-- the userId is the key
-- the timeStamp is the sorted key
-
-- we can regularly expire keys that are older than a particular score (since it's what we sort on)
-
-If we want to consider the map at different granularities:
-- each driver would be present in multiple geohashes, each with its own granularity
-  - we are probably talking about a few levels of depth, based on the spltting factor for the geohash (4 or more)
-
-Problems:
-- we now need to look at adjacent geohashes ourselves, rather than delegating this to Redis
-  - we need to compute the list ourselves, but this is an O(1)
-  - if our depth is constant (i.e. no expanding radiuses), we can pre-compute this and cache that list of neighbors for each of the hashes (might also work for variing radii, depends on how many levels we want)
-  
-### Ensure each driver is matched to a single ride
-
-- we need to make sure a ride is only offered to a single rider
-- this can be done by processing the list of riders in series (i.e. on the same thread)
-  - offer to one and wait
-  - if we don't hear back, offer to the next one
-- we need to make sure the dirver is not offered another ride by another instance 
-  - before offering the ride to a driver, acquire a short-lived distributed lock (Redis should work)
-  - there are certain edge cases with this approach:
-    - we acquire the lock
-    - the thread gets delayed
-    - the lock expires (and is acquired by another worker for another ride)
-    - the initial thread resumes execution and also offers the ride
-  - we might be able to live with having two push notifications, but we need to make sure the matching is done 1:1
-    - when the rider accepts the ride, we need an additional conditional check that is it currently not assigned
-    - ideally, we should be able to mark this in the DB somehow (fencing tokens)
-    - we might want to store a "ride-accepted counter" and do a conditional update, so we'd outsource the race condition check to the DB
-
-### Necessity of sending location updates at precise intervals
-
-- there's an uneven value in getting the location every X seconds for all drivers
-  - for someone going at high speed, we need more frequent updates
-  - for a driver that's parked, there's little value in getting it every 10s
-  - the client can take some inputs (e.g. speed, acceleration) and infer the frequency with which it should send updates
-  - this requires a "smarter" client, which we should have (as it's an app)
-
-
-### Scaling for high ride request
-
-- the ride service does not directly call the matching service
-- instead, it enqueues a message for it via an SQS queue
-  - this ensures message durability
-  - we return a success only after persisting to the queue
-  - at this point, we're promising we'll attempt to match it (although the process hasn't started yet)
-- a scaling set of workers reads from the queues and processes the items with a high degree of parallelism
-  - if a worker crashes halfway through, the enqueued item will be visible again after the visibility timeout (as it wasn't marked as finished)
-  - we will be processing items out of order, but that is fine, as the requests are indepent of each other
-
-### Scaling our system further
-
-- our service is highly partitionable based on locations (at a high level)
-- we can have separate deployments handling disjoin geographical areas (e.g. at a continent / country scale)
-  - we might also need to keep data local, so we do need separate deployments (e.g. for EU, China, etc.)
-
-![Uber final design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/uber-final.jpg)
-
 # Part 2 - Chapter 2 - Nearby friends
 
 ## Requirements
@@ -1580,6 +1445,130 @@ The distance between nodes takes into account not just the physical distance, bu
   - this introduces state to one of our services (the websocket service)
   - since we have a large number of users, we need a Redis cluster -> more overhead
 
+# Part 2 - Chapter 6 - Ad click aggregator
+
+## Requirements
+
+### Functional
+
+- user clicks on an add and is redirected to another website
+- advertisers can query and get details on how many times an ad was clicked within a configurable interval (last M minutes)
+- retrieve top most clicked ads in the last M minutes
+  - support filtering
+
+### Non-functional
+
+- aggregates need to be correct 
+- a click should be included in the aggregate as soon as possible (a few minutes at most)
+- querying for aggregates should be fast
+- we should not be losing clicks / impressions
+- we should not be counting clicks multiple times
+  - robustness
+  - protect against malicious users
+
+## Basic design
+
+### Models
+
+Ad
+- id
+- redirectUrl
+- ...
+
+Impression
+- id
+- associatedAd
+- user
+- timestamp
+
+### APIs
+
+generateImpression() -> Impression
+clickAd(impressionId) -> 302, redirect to Url
+
+### Notes
+
+We are dealing with very different entities in our system, with different usage patterns. We store each of them in its own system
+
+- the ad information (slowly changing) -> dynamo
+- impressions (generated once per click) -> dynamo
+- raw click data (write heavy, very few reads) -> Cassandra
+- aggregate data -> OLAP system
+  
+![Analytics initial design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/analytics-initial.jpg)
+
+## Deep dives
+
+### Scale
+
+1. click registration service
+  - stateless, we can always add more machines
+
+2. The kafka topics for click processing
+  - we need enough partitions to allow sufficient parallelism within a consumer group
+  - we can't have more parallel consumers than partitions, so we can chose an initial number of partitons that is large enough
+  - determine the time needed to process a message for the consumers and configure Kafka based on that information
+  - the adId is a good partition key
+    - this will lead to all impressions for the same ad being sent to the same topic
+    - the aggregator doesn't need to correlate them across Kafka partitions
+  - we might have hot partitions, when an ad is particularly shown (e.g. a campaign)
+    - shard it further by appending a suffix (e.g. _1, _2).
+    - requires more complex logic for gathering the results
+
+3. Aggregate service
+  - this should be an off-the-shelf solution
+  - we'll most likely have a map-reduce kind of implementation
+  - this comes with natural horizontal scalability, as the aggregation jobs could be distributed to different machines (sincen they are not sharing anything)
+  - TODO - more on Spark (used at Uber)
+
+4. OLAP DB
+  - scales by adding more nodes
+  - shard by addId would be natural
+  - we can also shard by advertiserId => each advertiser querying would get all the information from a single partition
+
+### Reliability
+
+- we need to make sure every click is recorded
+- our components offer strong durability guarantees (e.g. Kafka)
+  - we configure it with a retention period that would allow us to reprocess events in cases of failures (e.g. a week)
+  - should a processor go down, the data is still persiste in Kafka and it can resume
+  - a kafka consume should only ack once its done processing
+    - this turns into an at-least-once situation, so we need additional deduplication (see the ImpressionId)
+  
+- events might come out of order, or significantly delayed 
+  - this will lead to them not being aggregated in the right place
+
+Steam processing:
+- offers real time aggregates
+- operates on an unbound stream
+
+Batch processing:
+- operates on a known set
+- the calculations are delayed by its nature (e.g. up to the wait time between executions)
+
+We can have best of both worlds:
+- use a steam processing to offer information as soon as possible
+- have the authoritative version be the batch processing
+  - as it can run at precise intervals, it can be tuned so it is more likely to catch delayed events
+  - e.g. if an event comes hours later, if we run our batch once per day, we'll most likely catch it
+- equivalent to reconciliation, but authoritative
+
+### Reduce duplication / fraud
+
+- before displaying the ad, the client requests an impressionId
+  - this corresponds to a unique display of the ad
+  - we will either have 0 or 1 click events for that impressionId
+
+- the click server needs to verify the integrity of the impressionId sent by the client
+  - if we don't recognise it, discard
+  - if it's already been seen (i.e. in our cache), don't add it to the Kafka stream
+
+### Offer low latency querying
+
+- we already expose aggregates in the OLAP DB
+- we should be able to creata **materialized views**, that will speed up the querying
+  - we sacrifice storage space for faster reads
+
 
 # Others - Ticketmaster
 
@@ -1745,127 +1734,259 @@ Scaling across geographies
   - we also rely on Stripe's webhooks being retried etc
 
 
-
-# Part 2 - Chapter 6 - Ad click aggregator
+# Others - Uber
 
 ## Requirements
 
 ### Functional
 
-- user clicks on an add and is redirected to another website
-- advertisers can query and get details on how many times an ad was clicked within a configurable interval (last M minutes)
-- retrieve top most clicked ads in the last M minutes
-  - support filtering
+Users should be able to:
 
-### Non-functional
+- send a start and an end location and get a fare estimate
+- accept an estimate
 
-- aggregates need to be correct 
-- a click should be included in the aggregate as soon as possible (a few minutes at most)
-- querying for aggregates should be fast
-- we should not be losing clicks / impressions
-- we should not be counting clicks multiple times
-  - robustness
-  - protect against malicious users
+Riders should be able to:
+- accept / reject a request
+- get navigation instructions between A and B
+
+### Non-fuctional
+
+- matching should be fast (e.g. < 1min)
+- one driver assigned to one ride at one time
+  - strongly consistent around ride matching
+  - available everywhere else
+- system should be able to handle very high request peaks (e.g. 100K requests)
 
 ## Basic design
 
 ### Models
 
-Ad
-- id
-- redirectUrl
-- ...
+Core entities:
+- Rider
+- Driver
+- Ride
+- Location
+  - we need to know nearby drivers to we can offer them rides
 
-Impression
-- id
-- associatedAd
-- user
-- timestamp
+### Api design
 
-### APIs
+- getEstimate(start, end) -> Ride
+- acceptEstimate(rideId) 
 
-generateImpression() -> Impression
-clickAd(impressionId) -> 302, redirect to Url
+Drivers:
+- updateLocation(current)
+- acceptRide(rideId) -> Location (for pickup)
+- updateRideStatus(rideId, status) -> Location (next checkpoint)
 
-### Notes
-
-We are dealing with very different entities in our system, with different usage patterns. We store each of them in its own system
-
-- the ad information (slowly changing) -> dynamo
-- impressions (generated once per click) -> dynamo
-- raw click data (write heavy, very few reads) -> Cassandra
-- aggregate data -> OLAP system
-  
-![Analytics initial design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/analytics-initial.jpg)
+![Uber basic design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/uber-basic.jpg)
 
 ## Deep dives
 
-### Scale
+### Ensure we can handle the flow up location updates
 
-1. click registration service
-  - stateless, we can always add more machines
+- estimated number of drivers: 5M
+- each driver would send a location update every 5s
+- 1M writes per second
 
-2. The kafka topics for click processing
-  - we need enough partitions to allow sufficient parallelism within a consumer group
-  - we can't have more parallel consumers than partitions, so we can chose an initial number of partitons that is large enough
-  - determine the time needed to process a message for the consumers and configure Kafka based on that information
-  - the adId is a good partition key
-    - this will lead to all impressions for the same ad being sent to the same topic
-    - the aggregator doesn't need to correlate them across Kafka partitions
-  - we might have hot partitions, when an ad is particularly shown (e.g. a campaign)
-    - shard it further by appending a suffix (e.g. _1, _2).
-    - requires more complex logic for gathering the results
+Additional observation: for the OLTP flow, we just care about the latest location information
+- we can use an in-memory store that would map the driver and its last updated location
+  - Redis is a good candidate, as we can also query for all points from a geohash based on the distance to the Rider
+  - we'll probably need more than 1 write instance, so a Redis cluster has to be configured
 
-3. Aggregate service
-  - this should be an off-the-shelf solution
-  - we'll most likely have a map-reduce kind of implementation
-  - this comes with natural horizontal scalability, as the aggregation jobs could be distributed to different machines (sincen they are not sharing anything)
-  - TODO - more on Spark (used at Uber)
+Problems:
+- as long as the diver continues to send updates, we continuously refresh the data
+- when a driver stops sending updates, we need to invalidate the data point
+  - either have a separate sorted set and walk through it to invalidate
+  - or leave the data there, with no TTL
+    - the matching service also has to check the driver status in some other data source (this poses additional problems, as they might be out of sync)
 
-4. OLAP DB
-  - scales by adding more nodes
-  - shard by addId would be natural
-  - we can also shard by advertiserId => each advertiser querying would get all the information from a single partition
+### Invalidating location data
 
-### Reliability
+- a regular geohash does not allow expiring data
+- a sorted set however does
+- we can already think of our geohash as a map of (string -> list of drivers)
 
-- we need to make sure every click is recorded
-- our components offer strong durability guarantees (e.g. Kafka)
-  - we configure it with a retention period that would allow us to reprocess events in cases of failures (e.g. a week)
-  - should a processor go down, the data is still persiste in Kafka and it can resume
-  - a kafka consume should only ack once its done processing
-    - this turns into an at-least-once situation, so we need additional deduplication (see the ImpressionId)
+We store one sorted set per geohash. If this is at a single granularity, each driver should be present in "one" of them.
+- the set name is the geohashId (for the fixed granularity)
+- the userId is the key
+- the timeStamp is the sorted key
+
+- we can regularly expire keys that are older than a particular score (since it's what we sort on)
+
+If we want to consider the map at different granularities:
+- each driver would be present in multiple geohashes, each with its own granularity
+  - we are probably talking about a few levels of depth, based on the spltting factor for the geohash (4 or more)
+
+Problems:
+- we now need to look at adjacent geohashes ourselves, rather than delegating this to Redis
+  - we need to compute the list ourselves, but this is an O(1)
+  - if our depth is constant (i.e. no expanding radiuses), we can pre-compute this and cache that list of neighbors for each of the hashes (might also work for variing radii, depends on how many levels we want)
   
-- events might come out of order, or significantly delayed 
-  - this will lead to them not being aggregated in the right place
+### Ensure each driver is matched to a single ride
 
-Steam processing:
-- offers real time aggregates
-- operates on an unbound stream
+- we need to make sure a ride is only offered to a single rider
+- this can be done by processing the list of riders in series (i.e. on the same thread)
+  - offer to one and wait
+  - if we don't hear back, offer to the next one
+- we need to make sure the dirver is not offered another ride by another instance 
+  - before offering the ride to a driver, acquire a short-lived distributed lock (Redis should work)
+  - there are certain edge cases with this approach:
+    - we acquire the lock
+    - the thread gets delayed
+    - the lock expires (and is acquired by another worker for another ride)
+    - the initial thread resumes execution and also offers the ride
+  - we might be able to live with having two push notifications, but we need to make sure the matching is done 1:1
+    - when the rider accepts the ride, we need an additional conditional check that is it currently not assigned
+    - ideally, we should be able to mark this in the DB somehow (fencing tokens)
+    - we might want to store a "ride-accepted counter" and do a conditional update, so we'd outsource the race condition check to the DB
 
-Batch processing:
-- operates on a known set
-- the calculations are delayed by its nature (e.g. up to the wait time between executions)
+### Necessity of sending location updates at precise intervals
 
-We can have best of both worlds:
-- use a steam processing to offer information as soon as possible
-- have the authoritative version be the batch processing
-  - as it can run at precise intervals, it can be tuned so it is more likely to catch delayed events
-  - e.g. if an event comes hours later, if we run our batch once per day, we'll most likely catch it
-- equivalent to reconciliation, but authoritative
+- there's an uneven value in getting the location every X seconds for all drivers
+  - for someone going at high speed, we need more frequent updates
+  - for a driver that's parked, there's little value in getting it every 10s
+  - the client can take some inputs (e.g. speed, acceleration) and infer the frequency with which it should send updates
+  - this requires a "smarter" client, which we should have (as it's an app)
 
-### Reduce duplication / fraud
 
-- before displaying the ad, the client requests an impressionId
-  - this corresponds to a unique display of the ad
-  - we will either have 0 or 1 click events for that impressionId
+### Scaling for high ride request
 
-- the click server needs to verify the integrity of the impressionId sent by the client
-  - if we don't recognise it, discard
-  - if it's already been seen (i.e. in our cache), don't add it to the Kafka stream
+- the ride service does not directly call the matching service
+- instead, it enqueues a message for it via an SQS queue
+  - this ensures message durability
+  - we return a success only after persisting to the queue
+  - at this point, we're promising we'll attempt to match it (although the process hasn't started yet)
+- a scaling set of workers reads from the queues and processes the items with a high degree of parallelism
+  - if a worker crashes halfway through, the enqueued item will be visible again after the visibility timeout (as it wasn't marked as finished)
+  - we will be processing items out of order, but that is fine, as the requests are indepent of each other
 
-### Offer low latency querying
+### Scaling our system further
 
-- we already expose aggregates in the OLAP DB
-- we should be able to creata **materialized views**, that will speed up the querying
-  - we sacrifice storage space for faster reads
+- our service is highly partitionable based on locations (at a high level)
+- we can have separate deployments handling disjoin geographical areas (e.g. at a continent / country scale)
+  - we might also need to keep data local, so we do need separate deployments (e.g. for EU, China, etc.)
+
+![Uber final design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/uber-final.jpg)
+
+# Others - Tinder
+
+## Requirements
+
+### Functional
+
+- users can create a profile and set their preferences
+- users must be able to see other users in a particular area, based on their preferences
+- users must be able to express their interest in another user
+- when two users express mutual interest, notify them
+
+-------
+
+- uploading photots
+- chat
+
+### Non-functional
+
+- support large number of users / high throughput
+- chose consistency for expressing interest, as we don't want to lose those updates
+- availability for everything else
+- highly performant when showing matches
+- avoid showing already seen profiles
+
+## Basic design
+
+### Models
+
+User:
+- id
+...
+
+Match
+- firstUserId
+- secondUserId
+- status: created | accepted | rejected
+...
+
+Connection
+- firstUserId
+- secondUserId
+
+### APIs
+
+User initiated:
+- createProfile(preferences): 200
+- findUsers(location, radius): User[]
+- respondToMatch(accept: Bool, userId)
+
+Server initiated:
+- notifyOfMatch(otherUser)
+
+### System characteristics
+
+Estimates:
+
+200M DAU * 200 swipes => 4B writes / day => 40k writes / second
+- we need something that will support a large number of writes
+- both Cassandra and DynamoDB are good candidates
+
+When a user swipes yes, we need to check if there's a mutual match
+- if we partition the swipes by (user1, user2), we can easily check
+- when offering a match to user A (showing user B), we insert a swipe with partitionKey = userA, sortKey = userB
+  - if userA responds yes, query for (userB, userA) and see if there's a mutual match
+  - if yes, we can notify A immediatelly within the response for the HTTP call
+  - we need to push the notification to B; no point in keeping a channel open, as they might not even be online => send push notification
+
+![Tinder initial design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/tinder-initial.jpg)
+
+## Deep dives
+
+### Race conditions on matching the users
+
+- we might get both A matching B and B matching A at the same time
+- we need to make sure not only that we write both, but that we also notify them
+  - we can use **consistent reads** when checking for the inverse
+    - we write (userA, userB)
+    - check for (userB, userA) -> nothing
+    - we write (userB, userA)
+    - check for (userA, userB) -> consistent read, will go through the write replica for userA
+      - dynamo does offer serializable as an isolation level, so the 2nd read should see the initial write
+
+CONS:
+- consistent reads are more expensive than regular reads
+
+
+### Performance retrieval of a list of matches
+
+- we can use the Match DB to store both proposed matches, as well as the result of the swipe
+- we have a match builder service that regularly builds lists of matches for each user
+  - if it wants to propose user B to user A, it inserts a row of (userA, userB) to the Match DB
+    - might want to also insert the inverse
+  - the rows have an initial status of Created
+  - it also populates the match caches for both users
+  - the service can also be invoked on demand by the Match service, when the list of available matches in the cache is low for any particular user
+
+- the match cache can be rebuilt from the Match DB, by filtering out the matches based on their status 
+  - a LSI would be useful for this, as we're indexing within the same partitionKey (userId)
+
+- this leads to an issue when a user changes their preferences
+  - the data in the Match DB is now stale
+  - we can stop writing the matches directly
+  - the Match builder service can just populate the cache (in memory, with a TTL)
+    - when a user changes their preferences / location, invalidate it
+
+
+### Do not show users for which we already have a match
+
+- the match builder service needs to be able to efficiently (and consistently) list the existing matches / swipes
+  - we can query dynamo using just the partitionKey, so a point query
+  - will lead to repeatedly loading the same data
+  - will be expensive, as we need to do consistent reads every time
+- we can cache the last K offered matches for each user
+  - the match builder service can then check this when proposing a new list, and eliminate the ones that were already offered 
+
+Cons:
+- the lists can get large for a subset of users
+- a bloom filter can be used to filter out duplicates, although it might lead to false positives
+  - this would mean we might skip some legitimate profile offering
+  - over-engineered
+
+![Tinder final design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/tinder-final.jpg)

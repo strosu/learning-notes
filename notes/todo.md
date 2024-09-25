@@ -9,7 +9,7 @@ Design:
 3. Seven DBs:
     - Redis
 
-4. Finish System design interview part 1
+4. Finish System design interview part 1 - OK
 5. Finish System design interview part 2
 
 6. Review all problems with new data from https://www.hellointerview.com/learn/system-design/answer-keys/intro

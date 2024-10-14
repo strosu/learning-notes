@@ -109,9 +109,37 @@ A more in depth reading and notes from DDIA. All images taken from the book, unl
     - [Linearizable storage from Total order broadcasts](#linearizable-storage-from-total-order-broadcasts)
     - [Total order broadcast from linearizable storage](#total-order-broadcast-from-linearizable-storage)
   - [Distributed Transactions and Consensus](#distributed-transactions-and-consensus)
-    - [Atomic commit and 2PC](#atomic-commit-and-2pc)
+    - [Atomic commit](#atomic-commit)
+    - [Two-phase commit](#two-phase-commit)
     - [Distributed transactions](#distributed-transactions)
     - [Fault tolerant consensus](#fault-tolerant-consensus)
+    - [Epoch numbering](#epoch-numbering)
+    - [Raft discussion](#raft-discussion)
+  - [Membership and coordination](#membership-and-coordination)
+- [Derived data](#derived-data)
+- [Chapter 10 - Batch processing](#chapter-10---batch-processing)
+- [Chapter 11 - Stream processing](#chapter-11---stream-processing)
+  - [Message brokers](#message-brokers)
+  - [Patterns of delivery](#patterns-of-delivery)
+  - [Acknowledgements and redelivery](#acknowledgements-and-redelivery)
+  - [Message based brokers](#message-based-brokers)
+  - [Consumer delay](#consumer-delay)
+  - [Keeping systems in sync](#keeping-systems-in-sync)
+  - [CDC](#cdc)
+  - [Event sourcing](#event-sourcing)
+    - [Deriving the current state](#deriving-the-current-state)
+    - [Commands vs events](#commands-vs-events)
+  - [State, streams and immutability](#state-streams-and-immutability)
+    - [Immutability limitations](#immutability-limitations)
+  - [Processing streams](#processing-streams)
+    - [Complex Event processing](#complex-event-processing)
+    - [Analytics on streams](#analytics-on-streams)
+  - [What's the time?](#whats-the-time)
+  - [Window organization](#window-organization)
+  - [Fault tolerance](#fault-tolerance)
+    - [Atomic commits](#atomic-commits)
+    - [Idempotence](#idempotence)
+    - [Rebuilding state](#rebuilding-state)
 
 
 # Chapter 1
@@ -1963,7 +1991,7 @@ Different types of systems, based on their response times:
 
 Some properties of events:
 
-- an **event or record** is an small, self contained and immutable piece of information. 
+- an **event or record** is a small, self contained and immutable piece of information. 
 - it usually contains a timestamp of when it happened
 - it can be encoded in various ways
 - it is written once by a producer
@@ -1980,7 +2008,7 @@ Some properties of events:
 
 Differences compared to a DB:
 
-- designed to not stored data indefinitely 
+- designed to not store data indefinitely 
 - if data is deleted as soon as consumed, it should be safe to assume the set is relatively small compared to a DB
 - instead of indexes, other mechanisms allow consuming just a subset of data (e.g. topics, partitions)
 
@@ -1991,21 +2019,216 @@ Two scenarios are supported:
   - each message is delivered to a single consumer that is part of the group
   - this allows the a consumer (group) to scale horizontally
   - we can add more consumers to the group if the processing is slow
+  - used to parallelize / horizontall scale the processing of messages, when a single consume would not be fast enough to handle all the load
 
 2. fanout
   - each message is delivered once to each consumer group
-  - the consumer groups represent a separate conceptual consumer
-  - e.g. both system A and system B want to be notified when an event comes in
-  - allows multiple unrelated consumers to subscribe to the same set of notifications
+  - the consumer groups represent a separate conceptual consumer (e.g. both system A and system B want to be notified when an event comes in)
+  - allows multiple unrelated consumer groups to subscribe to the same set of notifications
 
 These can be combined (e.g. in Kafka):
 - a consumer group represents a logical "consumer", e.g. a service
   - messages are delivered **once to each consumer group**
 - within that group, we might have one or more actual consumers  
-  - **only one of the actual consumers receives the message from the broker**
+  - **only one of the actual consumers within a group receives the message from the broker**
 
   ## Acknowledgements and redelivery
 
   - message is considered to be processed only once it has been acknowledged
-  - if the processing takes too long / times out, the message is delivered to another consumer
+  - if the processing takes too long / times out, this is treated as a failure and the message is delivered to another consumer
     - in effect, a message **might** be delievered multiple times
+  - normally messages are delivered in the order in which they were produced
+
+![Out of oder processing](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/event-partition-out-of-order.png)
+
+- this problem would affect the overall ordering, but it should not be an issue within the same partition
+
+## Message based brokers
+
+The idea is similart to an LSM-tree:
+- when a new event is received by the broker, it is appended to the end of the log file
+- this file might grow too large, so we want to partition it, i.e. to have multiple files
+- each file represents a **partition**
+- a **topic** can be defined as a set of partitions, each living in a different broker instance
+  - within a partition, the broker assigns a monotonously increasing id to each message
+  - this results in the messages being ordered, but only within the context of a single partition
+
+![Out of oder processing](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/topics-partitions.png)
+
+Delivery patterns:
+
+- multiple consumer groups can read the same log file, so fanout is offered out of the box
+
+- when we want to horizontally scale the consumers, we assign each of them a set of partitions
+  - the immediate effect is that parallel processing count <= partition count
+  - additionally, a consumer will process events sequentially, as we care about the ordering => one slow message will clog the entire pipe
+
+- consuming messages sequentially offers another benefit for the broker:
+  - instead of keeping track of which particular messages were consumed, we just need to track the latest one -> **consumer offsets**
+    - the broker knows the offsets for one partition as (consumer group, offset)
+    - when a consumer fails, the partition is assigned to another one in the same group
+    - the broker delivers messages starting from the latest acknowledged one (i.e. the last one the previous instance ack'ed)
+    - the consumer can manipulate the offset if it wants to, i.e. it has control over replaying older messages
+
+## Consumer delay
+
+- the amount of data a partition can hold is bound by the storage of the node where it resides
+- eventually, the node will run out of space => it has to start dropping old events *eventually*
+  - if a consumer processes messages slower than they are produced, it will eventuall fall behind enough to lose message definitively
+  - we need to monitor how far consumers are and alert accordingly
+
+## Keeping systems in sync
+
+Problems appear when a system wants to keep multiple copies of the data in sync (e.g. a cache, indexes etc, in addition to the main DB)
+
+1. The operation might fail halfway through, either leaving the systems in an inconsistent state, or requiring a rollback (which also has to succeed)
+2. Race conditions might appear between concurrent writes
+- the ordering of the operations can be the same, but network delays might cause them to arrive out of order
+
+![Update race condition](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/race-condition-sync.png)
+
+- a similar problem appears when we replicate the data between different instances.
+- however, if we have a single leader, it can emit an authoritative stream of changes that are just applied by all the followers independently
+
+## CDC
+
+- we can write to our athoritative DB and have it emit an event log of changes
+- these changes can then be consumed by multiple other systems holding derived data
+- CDC is the mechanism through which we ensure all changes are broadcast to the consumers
+- this turns the DB into the single leader of a set of disjoin storage systems
+
+![CDC](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_ddia/cdc.png)
+
+Tradeoffs:
+
+- the producer has returned by the time that consumers read and process an event => async processing, with an eventual consistency
+
+## Event sourcing
+
+- similar approach to CDC
+  - instead of represending actual DB writes, events represents more "abstract" actions, e.g. user clicked a button, order was created etc
+  - one event will most likely results in multiple actual DB mutations
+- the state of the system is derived from a stream of changes
+
+### Deriving the current state
+
+- we normally care about the actual current state of the DB, e.g. what's the value right now
+- the different updates have to be ingested and interpreted 
+  - as oppsed to CDC, events don't directly overwrite each other, i.e. they don't overwrite a single key
+  - instead, we need the entire history related to an item (e.g. Created -> Paid -> Settled -> Reverted)
+- while the system can maintain a series of snapshots, this is only useful for crashes; **we cannot discard older events**
+
+### Commands vs events
+
+- once an event is written to a stream, we don't have any control over who will consume it
+- thus, any validation must happen **beforehand**
+- undoing an operation, e.g. cancelling a booking does not result in the initial entry being changed; instead, it results in a new entry being inserted into the stream
+- we can split the operation into two events:
+  - bookingAttempted -> represents the initial request, before validation
+  - bookingConfirmed -> event inserted post-validation; there just has to be a clear interface between the producer and consumers
+
+## State, streams and immutability
+
+- a single Kafka event log can be read by multiple consumers
+  - each consumer will then handle its own view of the data
+  - we can even store the data in different formats, optimized for different consumption patterns (e.g. for more efficient reads)
+  - most of the problems with schemas come from the optimizations for consumption
+
+- we can work around reading-your-own writes by performing a synchronous write
+  - this would require also updating the derived view of the data before returning (has to be done transactionally)
+
+- using a single log per partition outsources the problem of concurrent writes to the message broker
+  - if all the writes we care about are in a single partition, they are already serialized when written
+  - the consumer is single-threaded and ingests the events in order, so there's no race conditions
+
+### Immutability limitations
+
+- we're sensitive to the frequency of updates of a single data item
+  - if an item is updated frequently, this will result in more event entries per data entity
+- how do we handle data that has to be removed? e.g. legal or administrative reasons: GDPR etc?
+  - we need a mechanism that will actually alter the log
+  - this has the problem of not also altering data that is stored in derived systems, backups etc
+
+## Processing streams
+
+Three broad categories of consumption:
+
+- directly, to update some other system
+  - write indexes, caches etc
+- as a notification trigger
+  - this can be a real-time push, e.g. via a websocket somewhere towards a user
+- as part of a set of streams to be joined
+
+### Complex Event processing
+
+- we have a processor that takes multiple streams as an input
+- it needs to make **some** decision based on information that will come from multiple streams
+- thus, it needs to store the **rules** on which it reacts
+  - this can be considered the equivalent of a query
+- however, it does not store all the data that passes through it, only the relevant bits
+  - it is the inversion of a regular DB, where we store the data and figure out the query later on
+
+- a particular case is when we're interested if an event matches some pattern
+  - we define the search criteria, and this is applied to every event that comes in
+  - alternatively, we might want to build an index first - if our query is for "contains", it is faster to just index the document first and then do lookups
+  - when a match is detected, the processor can simply emit an output event to some other stream etc.
+
+### Analytics on streams
+
+- some processors don't care about individual events, but care about aggregates
+- the sequence of time over which they aggregate is called a **window**
+  - the processor might need to keep track of the events in the current window, while it can discard the ones from the previous segments as done
+  - how does this work with resilience? Can we hold off acknowledging events from the start of the window?
+- to work around the memory limitations, these might implement probabilistic algorithms
+
+
+## What's the time?
+
+- events might come out of order:
+  - instance A handles userCreated at T0 and emits it; a network delay causes the event to arrive at T2
+  - instance B handles userEdited at T1 ane emits it; the broker registers it at T1
+
+- events might come outside of their windows:
+  - by design, we have to define a cutoff point for the window
+  - whichever we chose, there's no guarantee that we will not receive follow up events that are held up somewhere
+
+- which time should be used?
+  - the timestamp included in the event (event registration, or event emittion time)
+  - or the timestamp when the broker received the event
+  - or the timestamp of the processor (local time) 
+
+## Window organization
+
+- **tumbling window**
+  - fixed size, no overlap
+  - all events between 12:02:00 and 12:02:59 are grouped in the 12:02 bucket etc
+- **hopping window**
+  - same as tumbling, but intervals can overlap
+  - all events in [12:02:00 - 12:06:59] are in the 5 minute window, all between [12:03:00 - 12:07:59] etc
+- **sliding window**
+  - no boundaries, just a max window size
+  - *all events in the last X minutes*
+  - keep a buffer of events and have them expire when they are old enough (redis sorted sets)
+
+## Fault tolerance
+
+- a stream processor cannot wait until it receives all the input, as this is an ongoing operation
+- thus, it has to define custom "cutoff points"
+  - an example are the windows defined above, i.e. a tumlbing configuration
+  - a job can simply operate across multiple disjoin sets and aggregate itself
+- alternatively, we can define arbitrary points where the state is persisted to disk, i.e. a **checkpoint**
+  - should the consumer crash, it can replay from the latest checkpoint + reprocess just a subset
+
+### Atomic commits
+
+- how would this work?
+
+### Idempotence
+
+- we're always exposed to the risk of a message being processed multiple times
+- thus, we need our consumers to be able to replay the same message without side-effects
+
+### Rebuilding state
+
+- we can either take regular snapshots and apply the diff
+- if the window over which we aggregate is small, it might be sufficient to just replay the events

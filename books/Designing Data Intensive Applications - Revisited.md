@@ -2202,9 +2202,11 @@ Three broad categories of consumption:
 - **tumbling window**
   - fixed size, no overlap
   - all events between 12:02:00 and 12:02:59 are grouped in the 12:02 bucket etc
+  - discard the second part of the timestamp -> direct grouping
 - **hopping window**
   - same as tumbling, but intervals can overlap
   - all events in [12:02:00 - 12:06:59] are in the 5 minute window, all between [12:03:00 - 12:07:59] etc
+  - split the intervals just like for a tumbling window, and include the small intervals in the large ones
 - **sliding window**
   - no boundaries, just a max window size
   - *all events in the last X minutes*

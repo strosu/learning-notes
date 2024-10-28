@@ -1569,6 +1569,102 @@ We can have best of both worlds:
 - we should be able to creata **materialized views**, that will speed up the querying
   - we sacrifice storage space for faster reads
 
+# Part 2 - Chapter 11 - Payment system
+
+## Requirements:
+
+Description:
+
+- backend for a commerce application
+- when an order is placed, we need to make sure we charge the customer
+- supported payment methods: ideally multiple payment methods per customer / allow them to pick one
+- the actual payment is handled by a 3rd party provider, e.g. Stripe
+- we do not store sensitive information ourselves
+- should support multiple currencies
+- 1M transactions / day => 10 / second
+- should support paying out the merchants as well => outflow
+- should offer reconciliation for verification purposes
+
+Functional:
+
+- charge customer
+- send payout to merchant
+- reconcile payment
+
+Non-functional:
+
+- highly reliable, prefer consistency over availability
+- highly scalable and fault tolerant
+- should correctly handle failed payments
+
+## Basic design:
+
+APIs:
+
+- charge(purchaseId: String, customer: User): paymentOrderId[]
+- payout(userId: String) -> 200
+
+
+## Models:
+
+User
+- id
+- walletId
+- paymentDetails (in/out)
+
+Wallet (double ledger for temporarely holding a user's funds before payouts)
+- id
+- userId
+- amount
+
+Purchase (represents a set of products the user is buying)
+- id
+- amount / currency
+- products: Product[]
+
+Product (single product, associated with 1 seller):
+- id
+- seller: User
+- productDetails
+
+PaymentOrder (request to execute ONE payment):
+- id
+- purchaseId
+- payments: PaymentAttempt[] -> used for retries etc
+- direction (in/out) -> same modelling for both charging customers and making payouts
+
+PaymentAttempt
+- id
+- paymentOrderId
+- status
+
+![Payment service initial design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/payment-system-initial.png)
+
+## Deep dives
+
+### Reliability
+
+- we're creating / updating multiple models at once when executing a payment
+- this requires a DB that supports atomic updates / transactions. This can be either relational, or DynamoDB
+- we need to be able to safely retry the entire operation, so this requires some mechanism for deduplication (e.g. the purchaseId)
+
+### Avoiding duplicate payments
+
+- the purchaseID is used as an idempotency key
+- combine with conditional inserts, e.g. NotExists to ensure we haven't already processed it
+- each paymentOrder has its own id, which is used as an idempotency key towards the payment provider (they also need to support it)
+
+### Reliability / fault tolerance
+
+### Failed payments
+
+- what happens when a payment fails?
+- the service gets notified by the PSP via a callback
+  - we mark it as failed 
+  - based on the type of failure, we can enqueue it to a retry queue or a DLQ for manual intervention
+  - some particular failures are just business failures, which do not need retrying
+
+
 
 # Others - Ticketmaster
 
@@ -1990,3 +2086,4 @@ Cons:
   - over-engineered
 
 ![Tinder final design](https://raw.githubusercontent.com/strosu/learning-notes/master/books/images_system_design_interview/tinder-final.jpg)
+
